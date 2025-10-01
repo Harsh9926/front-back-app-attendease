@@ -45,7 +45,7 @@ const DashboardScreen = () => {
   const summaryMessage = stats.totalEmployees > 0
     ? `${stats.presentToday} of ${stats.totalEmployees} employees are already present. Keep an eye on the wards with lower attendance to reach 100% completion.`
     : "No employees have been assigned yet. Once your team is connected, you'll see live attendance insights here.";
-  const resolveAttendanceId = useCallback(async (ward, employee) => {
+  const resolveAttendanceId = useCallback(async (ward, employee, dateOverride) => {
     const directId =
       employee?.attendance_id ??
       employee?.attendanceId ??
@@ -61,30 +61,38 @@ const DashboardScreen = () => {
 
     try {
       const supervisorId = user?.user_id ?? user?.id ?? user?.userId ?? null;
+      const currentDate = dateOverride || new Date().toISOString().split('T')[0];
       const payload = {
         emp_id: employee?.emp_id,
         ward_id: ward?.ward_id,
-        date: new Date().toISOString().split('T')[0],
+        date: currentDate,
       };
 
       if (supervisorId) {
         payload.user_id = supervisorId;
       }
 
-      const response = await apiService.getAttendanceRecord(payload);
-      const responseData = response?.data;
+      const response = await apiService.getEmployeeAttendance(
+        payload.emp_id,
+        payload.ward_id,
+        payload.date
+      );
 
+      const responseData = response?.data;
       if (!responseData) {
         return null;
       }
 
+      const attendanceRecord = Array.isArray(responseData)
+        ? responseData[0]
+        : responseData?.attendance ??
+          responseData?.data ??
+          responseData;
+
       return (
-        responseData?.attendance_id ??
-        responseData?.attendanceId ??
-        responseData?.id ??
-        responseData?.data?.attendance_id ??
-        responseData?.data?.attendanceId ??
-        responseData?.data?.id ??
+        attendanceRecord?.attendance_id ??
+        attendanceRecord?.attendanceId ??
+        attendanceRecord?.id ??
         null
       );
     } catch (error) {
@@ -360,19 +368,21 @@ const DashboardScreen = () => {
 
     let locationData = null;
     let attendanceId = null;
+    const attendanceDate = new Date().toISOString().split('T')[0];
 
     const buildAttendanceFormData = (suffix, forFaceAttendance = true) => {
+      const normalizedPunchType = (punchType ?? '').toString().toUpperCase();
       const formData = new FormData();
-      formData.append('punch_type', punchType);
+      formData.append('punch_type', normalizedPunchType);
       formData.append('latitude', locationData?.latitude?.toString() || '0');
       formData.append('longitude', locationData?.longitude?.toString() || '0');
       formData.append('address', locationData?.address || '');
+      formData.append('image_type', 'face');
+      formData.append('date', attendanceDate);
 
-      if (forFaceAttendance) {
-        formData.append('userId', employeeUserId.toString());
-      } else {
-        const fallbackUserId = supervisorId ?? employeeUserId;
-        formData.append('userId', fallbackUserId.toString());
+      const resolvedUserId = forFaceAttendance ? employeeUserId : (supervisorId ?? employeeUserId);
+      if (resolvedUserId) {
+        formData.append('userId', resolvedUserId.toString());
       }
 
       if (attendanceId) {
@@ -402,7 +412,7 @@ const DashboardScreen = () => {
       }
 
       if (!attendanceId) {
-        attendanceId = await resolveAttendanceId(ward, employee);
+        attendanceId = await resolveAttendanceId(ward, employee, attendanceDate);
       }
 
       const fallbackKey = `${wardId}-${employeeId}-${punchType}-fallback`;
@@ -444,12 +454,9 @@ const DashboardScreen = () => {
           response?.data?.status ||
           'Face image stored successfully.';
 
-        if (wardId && employeeId) {
-          markEmployeeFaceEnrollment(wardId, employeeId);
-        }
-
         Alert.alert('Face Enrollment', message);
         resetCameraState();
+        await fetchDashboardStats();
       } catch (error) {
         console.error('Face enrollment failed:', error);
         const message =
@@ -491,10 +498,6 @@ const DashboardScreen = () => {
         if (storeMessage) {
           console.log('Face enrollment before attendance:', storeMessage);
         }
-
-        if (wardId && employeeId) {
-          markEmployeeFaceEnrollment(wardId, employeeId);
-        }
       } catch (storeError) {
         console.error('Automatic face store before attendance failed:', storeError);
         const storeMessage =
@@ -518,7 +521,7 @@ const DashboardScreen = () => {
         return;
       }
 
-      attendanceId = await resolveAttendanceId(ward, employee);
+      attendanceId = await resolveAttendanceId(ward, employee, attendanceDate);
 
       const attendanceFormData = buildAttendanceFormData('face-attendance', true);
 

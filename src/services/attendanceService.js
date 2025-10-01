@@ -131,7 +131,7 @@ export class AttendanceService {
       // Prepare form data
       const formData = new FormData();
       if (attendanceId) formData.append('attendance_id', attendanceId);
-      formData.append('punch_type', 'in');
+      formData.append('punch_type', 'IN');
       formData.append('latitude', locationData.latitude.toString());
       formData.append('longitude', locationData.longitude.toString());
       formData.append('address', locationData.address);
@@ -172,7 +172,7 @@ export class AttendanceService {
       // Prepare form data
       const formData = new FormData();
       formData.append('attendance_id', attendanceId);
-      formData.append('punch_type', 'out');
+      formData.append('punch_type', 'OUT');
       formData.append('latitude', locationData.latitude.toString());
       formData.append('longitude', locationData.longitude.toString());
       formData.append('address', locationData.address);
@@ -218,7 +218,7 @@ export class AttendanceService {
 
       // Prepare form data
       const formData = new FormData();
-      formData.append('punch_type', punchType);
+      formData.append('punch_type', punchType?.toUpperCase?.() ?? 'IN');
       formData.append('latitude', locationData.latitude.toString());
       formData.append('longitude', locationData.longitude.toString());
       formData.append('address', locationData.address);
