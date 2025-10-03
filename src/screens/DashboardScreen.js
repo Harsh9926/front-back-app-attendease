@@ -540,14 +540,7 @@ const DashboardScreen = () => {
         error.response?.data?.message ||
         error.response?.data?.error ||
         'Unable to mark attendance right now. Please try again.';
-      const fallbackRoute = error.response?.data?.fallback_route || null;
-
-      if (fallbackRoute) {
-        console.warn('Face attendance failed, attempting fallback route:', fallbackRoute);
-        await performFallbackPunch();
-      } else {
-        Alert.alert('Attendance', message);
-      }
+      Alert.alert('Attendance', message);
     } finally {
       setPunchingMap(prev => {
         const updated = { ...prev };
