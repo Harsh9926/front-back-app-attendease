@@ -140,9 +140,23 @@ export const apiService = {
   storeFace: async (formData) => {
     const endpoint = API_ENDPOINTS.STORE_FACE;
     try {
-      return await api.post(endpoint, formData, {
+      const axiosResponse = await api.post(endpoint, formData, {
         headers: { 'Content-Type': 'multipart/form-data' }
       });
+      // Pretty-print the key fields we care about for face storage
+      try {
+        const payload = axiosResponse?.data ?? {};
+        const logPayload = {
+          success: payload?.success ?? true,
+          faceId: payload?.faceId ?? payload?.data?.faceId ?? null,
+          imageUrl: payload?.imageUrl ?? payload?.data?.imageUrl ?? null,
+          confidence: payload?.confidence ?? payload?.data?.confidence ?? null,
+        };
+        console.log(JSON.stringify(logPayload, null, 2));
+      } catch (logErr) {
+        // ignore logging errors
+      }
+      return axiosResponse;
     } catch (error) {
       const isNetworkError = !error.response && error.message?.includes('Network Error');
 
@@ -180,6 +194,18 @@ export const apiService = {
         }
 
         const data = await response.json();
+        // Pretty-print the key fields we care about for face storage (fallback path)
+        try {
+          const logPayload = {
+            success: data?.success ?? true,
+            faceId: data?.faceId ?? data?.data?.faceId ?? null,
+            imageUrl: data?.imageUrl ?? data?.data?.imageUrl ?? null,
+            confidence: data?.confidence ?? data?.data?.confidence ?? null,
+          };
+          console.log(JSON.stringify(logPayload, null, 2));
+        } catch (logErr) {
+          // ignore logging errors
+        }
         return { data };
       } catch (fallbackError) {
         console.error('storeFace: fallback upload failed', fallbackError);

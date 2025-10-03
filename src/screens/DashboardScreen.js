@@ -454,9 +454,14 @@ const DashboardScreen = () => {
           response?.data?.status ||
           'Face image stored successfully.';
 
+        // Immediately reflect success in UI: flip the button to Re-upload (green)
+        markEmployeeFaceEnrollment(wardId, employeeId);
+
         Alert.alert('Face Enrollment', message);
         resetCameraState();
         await fetchDashboardStats();
+        // Re-apply local UI state in case the server payload hasn't updated yet
+        markEmployeeFaceEnrollment(wardId, employeeId);
       } catch (error) {
         console.error('Face enrollment failed:', error);
         const message =
@@ -886,7 +891,7 @@ const DashboardScreen = () => {
                                       <ActivityIndicator size="small" color="#007bff" />
                                     ) : (
                                       <Text style={[styles.faceStoreButtonText, hasFaceEnrollment && styles.faceStoreButtonTextSecondary]}>
-                                        {hasFaceEnrollment ? 'Re-upload Face' : 'Store Face'}
+                                        {hasFaceEnrollment ? 'Re-upload' : 'Store Face'}
                                       </Text>
                                     )}
                                   </TouchableOpacity>
@@ -1314,8 +1319,8 @@ const styles = StyleSheet.create({
     borderColor: '#c2d4ff',
   },
   faceStoreButtonSecondary: {
-    backgroundColor: '#f1f3ff',
-    borderColor: '#c4c7f5',
+    backgroundColor: '#d1fae5', // light green
+    borderColor: '#10b981', // emerald
   },
   faceStoreButtonText: {
     color: '#007bff',
@@ -1323,7 +1328,7 @@ const styles = StyleSheet.create({
     fontWeight: '600',
   },
   faceStoreButtonTextSecondary: {
-    color: '#3f51b5',
+    color: '#065f46', // dark green text
   },
   punchButtonText: {
     color: '#fff',
