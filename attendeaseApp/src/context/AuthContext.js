@@ -138,10 +138,27 @@ export const AuthProvider = ({ children }) => {
         message: failureMessage
       };
     } catch (error) {
-      console.error('Login error:', error);
-      const errorMessage = error.response?.data?.error ||
-        error.response?.data?.message ||
-        'Login failed. Please check your credentials.';
+      const networkRelated =
+        error?.isNetworkError ||
+        error?.message === 'Network Error' ||
+        error?.code === 'ECONNABORTED';
+
+      if (networkRelated) {
+        console.error('Login network error:', {
+          message: error?.message,
+          url: error?.config?.url,
+          baseURL: error?.config?.baseURL,
+        });
+      } else {
+        console.error('Login error:', error);
+      }
+
+      const errorMessage = networkRelated
+        ? 'Unable to reach the AttendEase server. Confirm the backend is running and that your device can access it.'
+        : error?.response?.data?.error ||
+          error?.response?.data?.message ||
+          error?.message ||
+          'Login failed. Please check your credentials.';
       return {
         success: false,
         message: errorMessage

@@ -4,7 +4,7 @@
  * Lightweight CLI harness that pings every published AttendEase endpoint.
  *
  * Configure credentials and sample IDs via environment variables:
- *   API_BASE_URL              (defaults to http://13.202.210.74:5000/api)
+ *   API_BASE_URL              (defaults to http://localhost:5003/api)
  *   API_TEST_EMAIL            (required for login-dependent checks)
  *   API_TEST_PASSWORD         (required for login-dependent checks)
  *   API_TEST_SUPERVISOR_ID
@@ -25,7 +25,7 @@ const dotenv = require('dotenv');
 // Load .env if present
 dotenv.config({ path: path.resolve(__dirname, '..', '.env') });
 
-const BASE_URL = process.env.API_BASE_URL || process.env.EXPO_PUBLIC_API_BASE_URL || 'http://13.202.210.74:5000/api';
+const BASE_URL = process.env.API_BASE_URL || process.env.EXPO_PUBLIC_API_BASE_URL || 'http://localhost:5003/api';
 const TEST_EMAIL = process.env.API_TEST_EMAIL || '';
 const TEST_PASSWORD = process.env.API_TEST_PASSWORD || '';
 const SUPERVISOR_ID = process.env.API_TEST_SUPERVISOR_ID || '1';

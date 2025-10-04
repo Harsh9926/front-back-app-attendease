@@ -40,7 +40,17 @@ api.interceptors.response.use(
     return response;
   },
   async (error) => {
-    console.error('API Error:', error.response?.status, error.response?.data, 'for', error.config?.url);
+    const { message, code, config } = error ?? {};
+    const status = error?.response?.status ?? 'NETWORK_ERROR';
+    const payload = error?.response?.data ?? { message };
+    const requestUrl = config?.url ?? 'unknown-url';
+
+    if (!error.response) {
+      console.error('API Network Error:', { status, code, message, url: requestUrl, baseURL: config?.baseURL });
+      error.isNetworkError = true;
+    } else {
+      console.error('API Error:', status, payload, 'for', requestUrl);
+    }
 
     if (error.response?.status === 401) {
       // Token expired or invalid

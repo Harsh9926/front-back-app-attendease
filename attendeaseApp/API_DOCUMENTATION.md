@@ -1,6 +1,8 @@
 # 📌 AttendEase Mobile App - API Documentation
 
-**Base URL:** `http://13.202.210.74:5000/api`
+**Base URL:** Configured via `attendeaseApp/.env` → `EXPO_PUBLIC_API_BASE_URL`
+
+> ℹ️ When developing with Expo Go, leave `EXPO_PUBLIC_API_BASE_URL` pointing at `http://localhost:5003/api` and set `EXPO_PUBLIC_API_BASE_URL_LAN=auto`. The mobile client will automatically replace `localhost` with the current Expo host IP so physical devices resolve your machine correctly.
 ---
 
 ## 🔑 Authentication
