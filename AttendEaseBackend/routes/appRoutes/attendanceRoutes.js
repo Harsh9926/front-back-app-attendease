@@ -153,10 +153,11 @@ router.put("/", upload.single("image"), async (req, res) => {
     // Upload image directly as binary if provided
     if (req.file) {
       // Upload the raw buffer directly without base64 conversion
-      imageUrl = await uploadAttendanceImage(
+      const uploadResult = await uploadAttendanceImage(
         req.file.buffer, // Direct binary buffer
         `attendance_${attendance_id}_${punch_type}.jpg`
       );
+      imageUrl = uploadResult?.url ?? null;
     }
 
     // Update attendance record

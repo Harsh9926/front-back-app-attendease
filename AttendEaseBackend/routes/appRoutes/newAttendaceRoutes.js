@@ -13,8 +13,12 @@ const {
   getS3ImageStream,
 } = require("../../utils/s3Storage");
 
-const { rekognition, CreateCollectionCommand } = require("../../config/awsConfig");
-const { SearchFacesByImageCommand } = require("@aws-sdk/client-rekognition");
+const {
+  rekognition,
+  CreateCollectionCommand,
+  CompareFacesCommand,
+  SearchFacesByImageCommand,
+} = require("../../config/awsConfig");
 
 // Constants
 const PUNCH_TYPES = {
@@ -105,6 +109,12 @@ const mapRekognitionError = (error) => {
     },
   };
 };
+
+const AWS_S3_BUCKET = process.env.AWS_S3_BUCKET || process.env.S3_BUCKET_NAME;
+const parsedFaceThreshold = Number(process.env.FACE_MATCH_THRESHOLD ?? "90");
+const DEFAULT_FACE_MATCH_THRESHOLD = Number.isFinite(parsedFaceThreshold)
+  ? parsedFaceThreshold
+  : 90;
 
 // Utility functions
 function formatDate(date = new Date()) {
@@ -199,15 +209,51 @@ async function processPunch(
   punchType,
   imageFile,
   userId,
-  locationData
+  locationData,
+  options = {}
 ) {
-  let imageUrl = null;
+  const {
+    employeeId: explicitEmployeeId = null,
+    requireFaceMatch = false,
+    faceMatchThreshold = DEFAULT_FACE_MATCH_THRESHOLD,
+  } = options;
 
+  let uploadResult = null;
   if (imageFile) {
-    imageUrl = await uploadAttendanceImage(
+    uploadResult = await uploadAttendanceImage(
       imageFile.buffer,
       `attendance_${attendanceId}_${punchType}.jpg`
     );
+  }
+
+  const imageUrl = uploadResult?.url ?? null;
+  const attendanceImageKey = uploadResult?.key ?? null;
+
+  const resolvedEmployeeId =
+    explicitEmployeeId ?? (await resolveAttendanceEmployeeId(attendanceId));
+
+  let faceMatchMeta = null;
+  if (
+    requireFaceMatch &&
+    AWS_S3_BUCKET &&
+    attendanceImageKey &&
+    resolvedEmployeeId
+  ) {
+    try {
+      faceMatchMeta = await ensureFaceMatch(
+        resolvedEmployeeId,
+        attendanceImageKey,
+        faceMatchThreshold
+      );
+    } catch (error) {
+      throw error;
+    }
+  } else if (requireFaceMatch && !attendanceImageKey) {
+    const err = new Error(
+      "Attendance image could not be uploaded; face verification failed"
+    );
+    err.statusCode = 500;
+    throw err;
   }
 
   const isPunchIn = punchType === PUNCH_TYPES.IN;
@@ -236,7 +282,13 @@ async function processPunch(
     throw new Error("Attendance update failed");
   }
 
-  return result.rows[0];
+  const record = result.rows[0];
+  if (faceMatchMeta) {
+    record.face_similarity = faceMatchMeta.similarity;
+    record.face_match_threshold = faceMatchMeta.threshold;
+  }
+
+  return record;
 }
 
 async function resolvePunchActor(rawUserId) {
@@ -259,6 +311,118 @@ async function resolvePunchActor(rawUserId) {
   }
 
   return null;
+}
+
+function resolveS3ObjectKey(reference) {
+  if (!reference) {
+    return null;
+  }
+
+  if (reference.includes("://")) {
+    try {
+      const url = new URL(reference);
+      return decodeURIComponent(url.pathname.replace(/^\/+/u, ""));
+    } catch (error) {
+      console.warn("resolveS3ObjectKey: unable to parse URL", error);
+      return null;
+    }
+  }
+
+  return reference.replace(/^\/+/u, "");
+}
+
+async function resolveAttendanceEmployeeId(attendanceId) {
+  if (!attendanceId) {
+    return null;
+  }
+
+  try {
+    const { rows } = await pool.query(
+      "SELECT emp_id FROM attendance WHERE attendance_id = $1",
+      [attendanceId]
+    );
+    return rows[0]?.emp_id ?? null;
+  } catch (error) {
+    console.error("resolveAttendanceEmployeeId error:", error);
+    return null;
+  }
+}
+
+async function ensureFaceMatch(employeeId, attendanceKey, threshold) {
+  if (!AWS_S3_BUCKET) {
+    console.warn(
+      "ensureFaceMatch: AWS_S3_BUCKET not configured; skipping face verification"
+    );
+    return null;
+  }
+
+  if (!employeeId) {
+    const err = new Error("Unable to determine employee for attendance record");
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const { rows } = await pool.query(
+    "SELECT face_embedding FROM employee WHERE emp_id = $1",
+    [employeeId]
+  );
+
+  if (!rows.length) {
+    const err = new Error("Employee not found for face verification");
+    err.statusCode = 404;
+    throw err;
+  }
+
+  const faceEmbedding = rows[0].face_embedding;
+  if (!faceEmbedding) {
+    const err = new Error("Employee face enrollment is missing");
+    err.statusCode = 412;
+    err.details = "Ask the employee to store their face before marking attendance.";
+    throw err;
+  }
+
+  const faceKey = resolveS3ObjectKey(faceEmbedding);
+  if (!faceKey) {
+    const err = new Error("Unable to resolve stored face image");
+    err.statusCode = 500;
+    throw err;
+  }
+
+  const compareCommand = new CompareFacesCommand({
+    SourceImage: {
+      S3Object: {
+        Bucket: AWS_S3_BUCKET,
+        Name: faceKey,
+      },
+    },
+    TargetImage: {
+      S3Object: {
+        Bucket: AWS_S3_BUCKET,
+        Name: attendanceKey,
+      },
+    },
+    SimilarityThreshold: threshold,
+  });
+
+  let compareResponse;
+  try {
+    compareResponse = await rekognition.send(compareCommand);
+  } catch (error) {
+    error.statusCode = error.$metadata?.httpStatusCode || 500;
+    throw error;
+  }
+
+  const bestMatch = compareResponse?.FaceMatches?.[0];
+  const similarity = bestMatch?.Similarity ?? 0;
+
+  if (!bestMatch || similarity < threshold) {
+    const err = new Error("Captured face does not match enrolled face");
+    err.statusCode = 401;
+    err.details = `Similarity ${similarity.toFixed(2)}% below threshold ${threshold}%`;
+    throw err;
+  }
+
+  return { similarity, threshold };
 }
 
 // Routes
@@ -289,7 +453,7 @@ router.put("/", upload.single("image"), async (req, res) => {
   try {
     // Validate punch conditions
     const attendance = await pool.query(
-      `SELECT punch_in_time, punch_out_time FROM attendance WHERE attendance_id = $1`,
+      `SELECT emp_id, punch_in_time, punch_out_time FROM attendance WHERE attendance_id = $1`,
       [attendance_id]
     );
 
@@ -297,7 +461,8 @@ router.put("/", upload.single("image"), async (req, res) => {
       return res.status(404).json({ error: "Attendance record not found" });
     }
 
-    const { punch_in_time, punch_out_time } = attendance.rows[0];
+    const { emp_id: attendanceEmpId, punch_in_time, punch_out_time } =
+      attendance.rows[0];
 
     if (punch_type === PUNCH_TYPES.IN && punch_in_time) {
       return res.status(400).json({ error: "Already punched in today" });
@@ -318,6 +483,10 @@ router.put("/", upload.single("image"), async (req, res) => {
         latitude,
         longitude,
         address,
+      },
+      {
+        employeeId: attendanceEmpId,
+        requireFaceMatch: false,
       }
     );
 
@@ -536,13 +705,20 @@ router.post("/face-attendance", upload.single("image"), async (req, res) => {
       punch_type,
       req.file,
       userId,
-      { latitude: latitude, longitude: longitude, address: address }
+      { latitude, longitude, address },
+      {
+        employeeId: emp_id,
+        requireFaceMatch: true,
+        faceMatchThreshold: DEFAULT_FACE_MATCH_THRESHOLD,
+      }
     );
 
     res.json({
       success: true,
       employee: employeeRecord.name,
       punch_type,
+      face_similarity: updated.face_similarity ?? null,
+      face_match_threshold: updated.face_match_threshold ?? DEFAULT_FACE_MATCH_THRESHOLD,
       time:
         punch_type === PUNCH_TYPES.IN
           ? updated.punch_in_time
@@ -550,6 +726,14 @@ router.post("/face-attendance", upload.single("image"), async (req, res) => {
     });
   } catch (error) {
     console.error("Face attendance error:", error);
+
+    if (error.statusCode) {
+      return res.status(error.statusCode).json({
+        error: error.message,
+        ...(error.details ? { details: error.details } : {}),
+      });
+    }
+
     const { status, payload } = mapRekognitionError(error);
     res.status(status).json(payload);
   }

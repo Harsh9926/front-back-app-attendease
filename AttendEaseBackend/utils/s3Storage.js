@@ -35,7 +35,11 @@ async function uploadImageLocally(imageBuffer, fileName) {
   const attendanceDir = ensureLocalDirectory();
   const filePath = path.join(attendanceDir, fileName);
   await fs.promises.writeFile(filePath, imageBuffer);
-  return `/uploads/attendance/${fileName}`;
+  return {
+    storage: "local",
+    key: null,
+    url: `/uploads/attendance/${fileName}`,
+  };
 }
 
 function buildAttendanceKey(fileName) {
@@ -71,11 +75,13 @@ async function uploadAttendanceImage(imageBuffer, fileName) {
     }
   }
 
-  if (!S3_BASE_URL) {
-    return key;
-  }
+  const url = S3_BASE_URL ? `${S3_BASE_URL}${key}` : key;
 
-  return `${S3_BASE_URL}${key}`;
+  return {
+    storage: "s3",
+    key,
+    url,
+  };
 }
 
 function isLocalImage(imageUrl) {
