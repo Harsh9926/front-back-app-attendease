@@ -5,12 +5,33 @@ const {
   s3,
   IndexFacesCommand,
   CreateCollectionCommand,
+  DeleteFacesCommand,
   DeleteObjectCommand,
+  HeadObjectCommand,
 } = require("../../config/awsConfig");
 const pool = require("../../config/db");
 const upload = require("../../middleware/upload");
 
 const bucketName = process.env.AWS_S3_BUCKET || process.env.AWS_S3_BUCKET;
+const awsRegion = process.env.AWS_REGION;
+
+const buildPublicFaceUrl = (key) => {
+  if (!bucketName || !key) {
+    return null;
+  }
+
+  if (key.startsWith("http")) {
+    return key;
+  }
+
+  const normalizedKey = key.replace(/^\/+/, "");
+
+  if (awsRegion) {
+    return `https://${bucketName}.s3.${awsRegion}.amazonaws.com/${normalizedKey}`;
+  }
+
+  return `https://${bucketName}.s3.amazonaws.com/${normalizedKey}`;
+};
 
 const normalizeId = (value) => {
   if (value === undefined || value === null) {
@@ -81,15 +102,20 @@ router.post("/store-face", upload.single("image"), async (req, res) => {
 
     let targetEmployeeId = null;
 
+    let employeeRecord = null;
+
     for (const candidate of candidateEmpIds) {
       try {
         const result = await pool.query(
-          "SELECT emp_id FROM employee WHERE emp_id = $1",
+          `SELECT emp_id, face_embedding, face_id, face_confidence
+             FROM employee
+             WHERE emp_id = $1`,
           [candidate]
         );
 
         if (result.rows.length > 0) {
-          targetEmployeeId = result.rows[0].emp_id;
+          employeeRecord = result.rows[0];
+          targetEmployeeId = employeeRecord.emp_id;
           break;
         }
       } catch (lookupError) {
@@ -101,6 +127,19 @@ router.post("/store-face", upload.single("image"), async (req, res) => {
       return res.status(404).json({
         error: "Employee not found",
         details: "Provide a valid employee identifier when storing face data.",
+      });
+    }
+
+    if (employeeRecord?.face_embedding) {
+      return res.status(409).json({
+        error: "Face already exists",
+        details: "Delete the existing face before uploading a new one.",
+        face: {
+          key: employeeRecord.face_embedding,
+          faceId: employeeRecord.face_id,
+          confidence: employeeRecord.face_confidence,
+          imageUrl: buildPublicFaceUrl(employeeRecord.face_embedding),
+        },
       });
     }
 
@@ -172,7 +211,7 @@ router.post("/store-face", upload.single("image"), async (req, res) => {
     res.json({
       success: true,
       faceId,
-      imageUrl: req.file.location,
+      imageUrl: req.file.location || buildPublicFaceUrl(req.file.key),
       confidence,
       empId: updateResult.rows[0].emp_id,
     });
@@ -195,6 +234,134 @@ router.post("/store-face", upload.single("image"), async (req, res) => {
       error: "Error processing face data",
       details: error.message,
     });
+  }
+});
+
+router.get("/:employeeId", async (req, res) => {
+  try {
+    const employeeId = normalizeId(req.params.employeeId);
+
+    if (employeeId === null) {
+      return res.status(400).json({ error: "Valid employee ID is required" });
+    }
+
+    const { rows } = await pool.query(
+      `SELECT emp_id, emp_code, name, face_embedding, face_confidence, face_id
+         FROM employee
+         WHERE emp_id = $1`,
+      [employeeId]
+    );
+
+    if (!rows.length) {
+      return res.status(404).json({ error: "Employee not found" });
+    }
+
+    const record = rows[0];
+
+    if (!record.face_embedding) {
+      return res.status(404).json({ error: "Face image not stored for this employee" });
+    }
+
+    let s3ObjectExists = true;
+    try {
+      await s3.send(
+        new HeadObjectCommand({
+          Bucket: bucketName,
+          Key: record.face_embedding,
+        })
+      );
+    } catch (headError) {
+      s3ObjectExists = false;
+    }
+
+    return res.json({
+      success: true,
+      face: {
+        empId: record.emp_id,
+        employeeCode: record.emp_code,
+        employeeName: record.name,
+        key: record.face_embedding,
+        imageUrl: buildPublicFaceUrl(record.face_embedding),
+        confidence: record.face_confidence,
+        faceId: record.face_id,
+        s3ObjectExists,
+      },
+    });
+  } catch (error) {
+    console.error("Fetch face error:", error);
+    res.status(500).json({ error: "Unable to fetch face details", details: error.message });
+  }
+});
+
+router.delete("/:employeeId", async (req, res) => {
+  try {
+    const employeeId = normalizeId(req.params.employeeId);
+
+    if (employeeId === null) {
+      return res.status(400).json({ error: "Valid employee ID is required" });
+    }
+
+    const { rows } = await pool.query(
+      `SELECT emp_id, face_embedding, face_id
+         FROM employee
+         WHERE emp_id = $1`,
+      [employeeId]
+    );
+
+    if (!rows.length) {
+      return res.status(404).json({ error: "Employee not found" });
+    }
+
+    const record = rows[0];
+
+    if (!record.face_embedding && !record.face_id) {
+      return res.status(404).json({ error: "No face stored for this employee" });
+    }
+
+    if (record.face_embedding) {
+      try {
+        await s3.send(
+          new DeleteObjectCommand({
+            Bucket: bucketName,
+            Key: record.face_embedding,
+          })
+        );
+      } catch (s3Error) {
+        console.error("Face delete S3 error:", s3Error);
+      }
+    }
+
+    const collectionId = resolveCollectionId();
+    if (collectionId && record.face_id) {
+      try {
+        await ensureCollectionExists(collectionId);
+        await rekognition.send(
+          new DeleteFacesCommand({
+            CollectionId: collectionId,
+            FaceIds: [record.face_id],
+          })
+        );
+      } catch (rekognitionError) {
+        console.error("Rekognition face delete error:", rekognitionError);
+      }
+    }
+
+    await pool.query(
+      `UPDATE employee
+         SET face_embedding = NULL,
+             face_confidence = NULL,
+             face_id = NULL
+       WHERE emp_id = $1`,
+      [employeeId]
+    );
+
+    return res.json({
+      success: true,
+      message: "Stored face removed successfully",
+    });
+  } catch (error) {
+    console.error("Face delete error:", error);
+    res.status(500).json({ error: "Unable to delete stored face", details: error.message });
   }
 });
 

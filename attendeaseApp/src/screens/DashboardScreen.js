@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import {
   View,
   Text,
@@ -10,6 +10,7 @@ import {
   ActivityIndicator,
   Modal,
   Image,
+  Platform,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useAuth } from '../context/AuthContext';
@@ -17,6 +18,27 @@ import { apiService } from '../services/apiService';
 import { useNavigation } from '@react-navigation/native';
 import { Camera as CameraModule, CameraView } from 'expo-camera';
 import attendanceService from '../services/attendanceService';
+import DateTimePicker from '@react-native-community/datetimepicker';
+
+const normalizeDate = (value) => {
+  const date = value instanceof Date ? new Date(value.getTime()) : new Date(value ?? Date.now());
+  date.setHours(0, 0, 0, 0);
+  return date;
+};
+
+const toISODate = (value) => normalizeDate(value).toISOString().split('T')[0];
+
+const formatDateDisplay = (value) => {
+  try {
+    return normalizeDate(value).toLocaleDateString(undefined, {
+      day: '2-digit',
+      month: 'short',
+      year: 'numeric',
+    });
+  } catch (_error) {
+    return '';
+  }
+};
 
 const DashboardScreen = () => {
   const { user } = useAuth();
@@ -25,6 +47,7 @@ const DashboardScreen = () => {
   const [stats, setStats] = useState({
     totalEmployees: 0,
     presentToday: 0,
+    markedCount: 0,
     totalWards: 0,
   });
   const [wardEmployees, setWardEmployees] = useState([]);
@@ -37,14 +60,15 @@ const DashboardScreen = () => {
   const cameraRef = useRef(null);
   const [pendingCapture, setPendingCapture] = useState(null);
   const [capturedPhotoUri, setCapturedPhotoUri] = useState(null);
+  const [facePreview, setFacePreview] = useState(null);
+  const [dateRange, setDateRange] = useState(() => {
+    const today = normalizeDate(new Date());
+    return { start: today, end: today };
+  });
+  const [showStartPicker, setShowStartPicker] = useState(false);
+  const [showEndPicker, setShowEndPicker] = useState(false);
   const isTablet = width >= 600 && width < 900;
   const isDesktop = width >= 900;
-  const attendanceRate = stats.totalEmployees > 0
-    ? Math.round((stats.presentToday / stats.totalEmployees) * 100)
-    : 0;
-  const summaryMessage = stats.totalEmployees > 0
-    ? `${stats.presentToday} of ${stats.totalEmployees} employees are already present. Keep an eye on the wards with lower attendance to reach 100% completion.`
-    : "No employees have been assigned yet. Once your team is connected, you'll see live attendance insights here.";
   const resolveAttendanceId = useCallback(async (ward, employee, dateOverride) => {
     const directId =
       employee?.attendance_id ??
@@ -135,7 +159,7 @@ const DashboardScreen = () => {
     return null;
   }, []);
 
-  const markEmployeeFaceEnrollment = useCallback((wardId, employeeId) => {
+  const markEmployeeFaceEnrollment = useCallback((wardId, employeeId, faceData = {}) => {
     if (!wardId || !employeeId) {
       return;
     }
@@ -156,6 +180,10 @@ const DashboardScreen = () => {
           face_verified: true,
           face_enrolled: true,
           face_registered: true,
+          faceRegistered: true,
+          face_image_url: faceData.imageUrl ?? emp?.face_image_url ?? emp?.faceImageUrl ?? null,
+          faceImageUrl: faceData.imageUrl ?? emp?.faceImageUrl ?? emp?.face_image_url ?? null,
+          faceEnrollmentUrl: faceData.imageUrl ?? emp?.faceEnrollmentUrl ?? null,
         };
       });
 
@@ -166,36 +194,157 @@ const DashboardScreen = () => {
     }));
   }, []);
 
-  useEffect(() => {
-    fetchDashboardStats();
-  }, [user?.user_id, user?.id, user?.userId]);
+  const clearEmployeeFaceEnrollment = useCallback((wardId, employeeId) => {
+    if (!wardId || !employeeId) {
+      return;
+    }
 
-  const fetchDashboardStats = async () => {
+    setWardEmployees(prevWards => prevWards.map(ward => {
+      if (ward?.ward_id !== wardId) {
+        return ward;
+      }
+
+      const updatedEmployees = (ward.employees || []).map(emp => {
+        const currentId = emp?.emp_id ?? emp?.empId ?? emp?.id;
+        if (currentId?.toString() !== employeeId.toString()) {
+          return emp;
+        }
+
+        return {
+          ...emp,
+          face_verified: false,
+          face_enrolled: false,
+          face_registered: false,
+          faceRegistered: false,
+          face_image_url: null,
+          faceImageUrl: null,
+          faceEnrollmentUrl: null,
+        };
+      });
+
+      return {
+        ...ward,
+        employees: updatedEmployees,
+      };
+    }));
+  }, []);
+
+  const toggleFaceEnrollmentLoading = useCallback((key, isLoading) => {
+    if (!key) {
+      return;
+    }
+
+    setFaceEnrollmentMap(prev => {
+      if (isLoading) {
+        if (prev[key]) {
+          return prev;
+        }
+        return { ...prev, [key]: true };
+      }
+
+      if (!prev[key]) {
+        return prev;
+      }
+
+      const updated = { ...prev };
+      delete updated[key];
+      return updated;
+    });
+  }, []);
+
+  const resetDateRange = useCallback(() => {
+    const today = normalizeDate(new Date());
+    setDateRange({ start: today, end: today });
+    setShowStartPicker(false);
+    setShowEndPicker(false);
+  }, []);
+
+  const handleStartDateChange = useCallback((event, selectedDate) => {
+    if (Platform.OS === 'android') {
+      setShowStartPicker(false);
+    }
+
+    const eventType = event?.type || 'set';
+
+    if (eventType === 'dismissed') {
+      return;
+    }
+
+    setDateRange(prev => {
+      const nextStart = normalizeDate(selectedDate ?? prev.start);
+      const adjustedEnd = nextStart > prev.end ? nextStart : prev.end;
+      return { start: nextStart, end: adjustedEnd };
+    });
+
+    if (Platform.OS === 'ios') {
+      setShowStartPicker(false);
+    }
+  }, []);
+
+  const handleEndDateChange = useCallback((event, selectedDate) => {
+    if (Platform.OS === 'android') {
+      setShowEndPicker(false);
+    }
+
+    if (event.type === 'dismissed') {
+      return;
+    }
+
+    setDateRange(prev => {
+      const nextEnd = normalizeDate(selectedDate ?? prev.end);
+      const adjustedStart = nextEnd < prev.start ? nextEnd : prev.start;
+      return { start: adjustedStart, end: nextEnd };
+    });
+
+    if (Platform.OS === 'ios') {
+      setShowEndPicker(false);
+    }
+  }, []);
+
+  const fetchDashboardStats = useCallback(async () => {
     try {
       console.log('Fetching dashboard stats...');
       const supervisorId = user?.user_id ?? user?.id ?? user?.userId ?? null;
-      const { success, data, message, raw } = await apiService.getSupervisorEmployees(supervisorId);
+      const { success, data, message, raw } = await apiService.getSupervisorEmployees(supervisorId, {
+        startDate: toISODate(dateRange.start),
+        endDate: toISODate(dateRange.end),
+      });
       console.log('Dashboard API Response:', raw);
 
       if (success) {
         const wardsData = data || [];
         let totalEmployees = 0;
-        let presentToday = 0;
+        let presentCount = 0;
+        let markedCount = 0;
 
         wardsData.forEach(ward => {
-          totalEmployees += ward.employees?.length || 0;
-          presentToday += ward.employees?.filter(emp => emp.attendance_status === 'Present').length || 0;
+          const employees = ward.employees || [];
+          totalEmployees += employees.length;
+          employees.forEach(emp => {
+            const status = (emp?.attendance_status || '').toString().toLowerCase();
+            if (status === 'present') {
+              presentCount += 1;
+            } else if (status.includes('marked')) {
+              markedCount += 1;
+            }
+          });
         });
 
         setStats({
           totalEmployees,
-          presentToday,
+          presentToday: presentCount,
+          markedCount,
           totalWards: wardsData.length,
         });
 
         setWardEmployees(wardsData);
 
-        console.log('Stats updated:', { totalEmployees, presentToday, totalWards: wardsData.length });
+        console.log('Stats updated:', {
+          totalEmployees,
+          present: presentCount,
+          marked: markedCount,
+          totalWards: wardsData.length,
+        });
       } else {
         console.error('Dashboard API returned success: false', raw);
         if (message) {
@@ -206,7 +355,11 @@ const DashboardScreen = () => {
       console.error('Error fetching dashboard stats:', error);
       console.error('Dashboard error details:', error.response?.data);
     }
-  };
+  }, [user?.user_id, user?.id, user?.userId, dateRange.start, dateRange.end]);
+
+  useEffect(() => {
+    fetchDashboardStats();
+  }, [fetchDashboardStats]);
 
   const navigateToEmployees = () => {
     navigation.navigate('Employees');
@@ -441,7 +594,7 @@ const DashboardScreen = () => {
     };
 
     if (mode === 'storeFace') {
-      setFaceEnrollmentMap(prev => ({ ...prev, [enrollmentKey]: true }));
+      toggleFaceEnrollmentLoading(enrollmentKey, true);
 
       try {
         const formData = new FormData();
@@ -457,22 +610,36 @@ const DashboardScreen = () => {
           response?.data?.status ||
           'Face image stored successfully.';
 
+        markEmployeeFaceEnrollment(wardId, employeeId, {
+          imageUrl:
+            response?.data?.imageUrl ||
+            response?.data?.data?.imageUrl ||
+            null,
+        });
+
         Alert.alert('Face Enrollment', message);
         resetCameraState();
         await fetchDashboardStats();
       } catch (error) {
         console.error('Face enrollment failed:', error);
+        const status = error.response?.status;
         const message =
+          error.response?.data?.details ||
           error.response?.data?.message ||
           error.response?.data?.error ||
           'Unable to store face image right now. Please try again.';
-        Alert.alert('Face Enrollment', message);
+
+        if (status === 409) {
+          Alert.alert(
+            'Face Enrollment',
+            `${message}
+Please delete the existing face from the Face Enrollment Center before capturing a new one.`
+          );
+        } else {
+          Alert.alert('Face Enrollment', message);
+        }
       } finally {
-        setFaceEnrollmentMap(prev => {
-          const updated = { ...prev };
-          delete updated[enrollmentKey];
-          return updated;
-        });
+        toggleFaceEnrollmentLoading(enrollmentKey, false);
       }
 
       return;
@@ -609,6 +776,43 @@ const DashboardScreen = () => {
     },
   ];
 
+  const markedAttendanceCount = useMemo(() => {
+    if (typeof stats.markedCount === 'number') {
+      return stats.markedCount;
+    }
+
+    let count = 0;
+    wardEmployees.forEach(ward => {
+      (ward?.employees || []).forEach(employee => {
+        const status = (employee?.attendance_status || '').toString().toLowerCase();
+        if (status.includes('marked')) {
+          count += 1;
+        }
+      });
+    });
+    return count;
+  }, [stats.markedCount, wardEmployees]);
+
+  const attendanceRate = stats.totalEmployees > 0
+    ? Math.min(100, Math.round(((stats.presentToday + markedAttendanceCount) / stats.totalEmployees) * 100))
+    : 0;
+
+  const formattedRangeLabel = useMemo(() => {
+    const startLabel = formatDateDisplay(dateRange.start);
+    const endLabel = formatDateDisplay(dateRange.end);
+    return startLabel === endLabel ? startLabel : `${startLabel} - ${endLabel}`;
+  }, [dateRange]);
+
+  const todayIso = useMemo(() => toISODate(new Date()), []);
+
+  const isDefaultRange = useMemo(() => {
+    return toISODate(dateRange.start) === todayIso && toISODate(dateRange.end) === todayIso;
+  }, [dateRange, todayIso]);
+
+  const summaryMessage = stats.totalEmployees > 0
+    ? `${markedAttendanceCount} employees fully marked and ${stats.presentToday} still in progress between ${formattedRangeLabel}. Tracking ${stats.totalEmployees} team members across your wards.`
+    : 'No employees have been assigned yet. Once your team is connected, you\'ll see live attendance insights here.';
+
   const statHighlights = [
     {
       id: 'total-employees',
@@ -621,21 +825,30 @@ const DashboardScreen = () => {
     },
     {
       id: 'present-today',
-      label: 'Present Today',
+      label: 'In Progress',
       value: stats.presentToday,
       icon: 'checkmark-done',
       iconColor: '#28a745',
       iconBackground: 'rgba(40, 167, 69, 0.12)',
-      helper: 'Checked in so far',
+      helper: 'Punch-ins without checkout',
+    },
+    {
+      id: 'marked-attendance',
+      label: 'Marked Attendance',
+      value: markedAttendanceCount,
+      icon: 'clipboard',
+      iconColor: '#ff8f1f',
+      iconBackground: 'rgba(255, 143, 31, 0.12)',
+      helper: 'Fully completed in range',
     },
     {
       id: 'attendance-rate',
       label: 'Attendance Rate',
       value: `${attendanceRate}%`,
       icon: 'speedometer',
-      iconColor: '#ff8f1f',
-      iconBackground: 'rgba(255, 143, 31, 0.12)',
-      helper: 'Daily performance',
+      iconColor: '#20a4f3',
+      iconBackground: 'rgba(32, 164, 243, 0.12)',
+      helper: 'Completion for selected range',
     },
     {
       id: 'total-wards',
@@ -647,10 +860,14 @@ const DashboardScreen = () => {
       helper: 'Locations you manage',
     },
   ];
-  const statRows = [
-    statHighlights.slice(0, 2),
-    statHighlights.slice(2, 4),
-  ];
+
+  const statRows = useMemo(() => {
+    const rows = [];
+    for (let i = 0; i < statHighlights.length; i += 2) {
+      rows.push(statHighlights.slice(i, i + 2));
+    }
+    return rows;
+  }, [statHighlights]);
 
   const captureMode = pendingCapture?.mode;
   const isFaceEnrollmentMode = captureMode === 'storeFace';
@@ -692,6 +909,215 @@ const DashboardScreen = () => {
     return '100%';
   };
 
+  const activeEnrollmentKey = useMemo(() => {
+    if (pendingCapture?.mode !== 'storeFace') {
+      return null;
+    }
+
+    const wardId = pendingCapture?.ward?.ward_id;
+    const employeeId =
+      pendingCapture?.employee?.emp_id ??
+      pendingCapture?.employee?.empId ??
+      pendingCapture?.employee?.employee_id ??
+      pendingCapture?.employee?.employeeId ??
+      pendingCapture?.employee?.id ??
+      null;
+
+    if (!wardId || !employeeId) {
+      return null;
+    }
+
+    return `${wardId}-${employeeId}`;
+  }, [pendingCapture]);
+
+  const faceEnrollmentEntries = useMemo(() => {
+    const items = [];
+
+    wardEmployees.forEach(ward => {
+      const wardId = ward?.ward_id;
+      if (!wardId) {
+        return;
+      }
+
+      (ward?.employees || []).forEach(employee => {
+        const employeeId =
+          employee?.emp_id ??
+          employee?.empId ??
+          employee?.employee_id ??
+          employee?.employeeId ??
+          employee?.id ??
+          null;
+
+        if (!employeeId) {
+          return;
+        }
+
+        const enrollmentKey = `${wardId}-${employeeId}`;
+        const punchInKey = `${wardId}-${employeeId}-in`;
+        const punchOutKey = `${wardId}-${employeeId}-out`;
+
+        const hasFaceEnrollment =
+          employee?.face_verified === true ||
+          employee?.face_enrolled === true ||
+          employee?.face_registered === true ||
+          employee?.faceRegistered === true ||
+          !!employee?.face_image_url ||
+          !!employee?.faceImageUrl ||
+          !!employee?.faceEnrollmentUrl;
+
+        items.push({
+          key: enrollmentKey,
+          ward,
+          employee,
+          hasFaceEnrollment,
+          isLoading: !!faceEnrollmentMap[enrollmentKey],
+          isPunchBusy: !!(punchingMap[punchInKey] || punchingMap[punchOutKey]),
+          isActive: activeEnrollmentKey === enrollmentKey,
+        });
+      });
+    });
+
+    return items.sort((a, b) => {
+      if (a.hasFaceEnrollment !== b.hasFaceEnrollment) {
+        return a.hasFaceEnrollment ? 1 : -1;
+      }
+
+      const nameA = (a.employee?.emp_name || '').toLowerCase();
+      const nameB = (b.employee?.emp_name || '').toLowerCase();
+      if (nameA < nameB) return -1;
+      if (nameA > nameB) return 1;
+      return 0;
+    });
+  }, [wardEmployees, faceEnrollmentMap, punchingMap, activeEnrollmentKey, cameraVisible, facePreview]);
+
+  const totalFaceCandidates = faceEnrollmentEntries.length;
+  const totalFaceEnrolled = faceEnrollmentEntries.filter(item => item.hasFaceEnrollment).length;
+  const isTwoColumnLayout = isTablet || isDesktop;
+
+  const closeFacePreview = useCallback(() => {
+    setFacePreview(null);
+  }, []);
+
+  const viewFaceDetails = useCallback(async (entry) => {
+    if (!entry?.employee?.emp_id) {
+      return;
+    }
+
+    const entryKey = entry.key;
+    toggleFaceEnrollmentLoading(entryKey, true);
+
+    try {
+      const response = await apiService.getFaceEnrollment(entry.employee.emp_id);
+      const face = response?.data?.face ?? response?.data ?? null;
+
+      if (!face?.imageUrl) {
+        Alert.alert('Face Enrollment', 'No face image found for this employee.');
+        return;
+      }
+
+      const rawConfidence = face?.confidence;
+      const numericConfidence =
+        typeof rawConfidence === 'number'
+          ? rawConfidence
+          : Number.isFinite(Number(rawConfidence))
+            ? Number(rawConfidence)
+            : null;
+
+      setFacePreview({
+        imageUrl: face.imageUrl,
+        employeeName: entry.employee?.emp_name || 'Employee',
+        wardName: entry.ward?.ward_name || null,
+        confidence: numericConfidence,
+      });
+    } catch (error) {
+      console.error('fetch face info failed:', error);
+      const message =
+        error.response?.data?.details ||
+        error.response?.data?.error ||
+        error.message ||
+        'Unable to fetch face details right now. Please try again.';
+      Alert.alert('Face Enrollment', message);
+    } finally {
+      toggleFaceEnrollmentLoading(entryKey, false);
+    }
+  }, [toggleFaceEnrollmentLoading]);
+
+  const performFaceDeletion = useCallback(async (entry) => {
+    if (!entry?.employee?.emp_id) {
+      return;
+    }
+
+    const entryKey = entry.key;
+    const wardId = entry.ward?.ward_id;
+    const employeeId = entry.employee?.emp_id;
+
+    toggleFaceEnrollmentLoading(entryKey, true);
+
+    try {
+      await apiService.deleteFaceEnrollment(employeeId);
+      clearEmployeeFaceEnrollment(wardId, employeeId);
+      await fetchDashboardStats();
+
+      Alert.alert(
+        'Face Enrollment',
+        'Existing face removed. Capture a new face now.',
+        [
+          {
+            text: 'Capture Now',
+            onPress: () => openFaceEnrollmentCapture(entry.ward, entry.employee),
+          },
+          { text: 'Later', style: 'cancel' },
+        ]
+      );
+    } catch (error) {
+      console.error('delete face failed:', error);
+      const message =
+        error.response?.data?.details ||
+        error.response?.data?.error ||
+        error.message ||
+        'Unable to delete the stored face right now. Please try again.';
+      Alert.alert('Face Enrollment', message);
+    } finally {
+      toggleFaceEnrollmentLoading(entryKey, false);
+    }
+  }, [toggleFaceEnrollmentLoading, clearEmployeeFaceEnrollment, fetchDashboardStats, openFaceEnrollmentCapture]);
+
+  const promptFaceDeletion = useCallback((entry) => {
+    Alert.alert(
+      'Delete stored face?',
+      'Deleting will remove the existing face image from the system. You must capture a new face afterwards.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Delete', style: 'destructive', onPress: () => performFaceDeletion(entry) },
+      ]
+    );
+  }, [performFaceDeletion]);
+
+  const handleFaceEnrollmentAction = useCallback((entry) => {
+    if (!entry) {
+      return;
+    }
+
+    if (!entry.hasFaceEnrollment) {
+      openFaceEnrollmentCapture(entry.ward, entry.employee);
+      return;
+    }
+
+    Alert.alert(
+      'Face already stored',
+      'Delete the existing face before uploading a new one.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'View Face', onPress: () => viewFaceDetails(entry) },
+        {
+          text: 'Delete & Capture',
+          style: 'destructive',
+          onPress: () => promptFaceDeletion(entry),
+        },
+      ]
+    );
+  }, [openFaceEnrollmentCapture, viewFaceDetails, promptFaceDeletion]);
+
   return (
     <ScrollView style={styles.container} showsVerticalScrollIndicator={false}>
       {/* Compact Header */}
@@ -712,200 +1138,384 @@ const DashboardScreen = () => {
       </View>
 
       <View style={styles.content}>
-        {/* Compact Statistics Cards */}
-        <View style={styles.statsGrid}>
-          {statRows.map((row, rowIndex) => (
-            <View
-              key={`stats-row-${rowIndex}`}
-              style={[styles.statsRow, rowIndex === statRows.length - 1 && styles.statsRowLast]}
-            >
-              {row.map((card) => (
-                <View key={card.id} style={styles.statCard}>
-                  <View style={[styles.statIconWrapper, { backgroundColor: card.iconBackground }]}>
-                    <Ionicons name={card.icon} size={18} color={card.iconColor} />
+        <View
+          style={[styles.dashboardLayout, isTwoColumnLayout && styles.dashboardLayoutWide]}
+        >
+          <View style={styles.dashboardMain}>
+            <View style={styles.dateFilterCard}>
+              <View style={styles.dateFilterHeader}>
+                <Text style={styles.dateFilterTitle}>Attendance Range</Text>
+                <TouchableOpacity
+                  style={[styles.dateFilterReset, isDefaultRange && styles.dateFilterResetDisabled]}
+                  onPress={resetDateRange}
+                  disabled={isDefaultRange}
+                >
+                  <Ionicons name="refresh" size={14} color="#3f51b5" />
+                  <Text style={styles.dateFilterResetText}>Reset</Text>
+                </TouchableOpacity>
+              </View>
+              <View style={styles.dateFilterRow}>
+                <TouchableOpacity
+                  style={styles.dateFilterButton}
+                  onPress={() => setShowStartPicker(true)}
+                  activeOpacity={0.7}
+                >
+                  <Ionicons name="calendar-outline" size={18} color="#3f51b5" />
+                  <View style={styles.dateFilterButtonContent}>
+                    <Text style={styles.dateFilterLabel}>Start</Text>
+                    <Text style={styles.dateFilterValue}>{formatDateDisplay(dateRange.start)}</Text>
                   </View>
-                  <Text style={styles.statValue}>{card.value}</Text>
-                  <Text style={styles.statLabel}>{card.label}</Text>
-                  <Text style={styles.statHelper}>{card.helper}</Text>
+                </TouchableOpacity>
+                <Ionicons name="arrow-forward" size={16} color="#6b778d" style={styles.dateFilterArrow} />
+                <TouchableOpacity
+                  style={styles.dateFilterButton}
+                  onPress={() => setShowEndPicker(true)}
+                  activeOpacity={0.7}
+                >
+                  <Ionicons name="calendar-clear-outline" size={18} color="#3f51b5" />
+                  <View style={styles.dateFilterButtonContent}>
+                    <Text style={styles.dateFilterLabel}>End</Text>
+                    <Text style={styles.dateFilterValue}>{formatDateDisplay(dateRange.end)}</Text>
+                  </View>
+                </TouchableOpacity>
+              </View>
+            </View>
+
+            {/* Compact Statistics Cards */}
+            <View style={styles.statsGrid}>
+              {statRows.map((row, rowIndex) => (
+                <View
+                  key={`stats-row-${rowIndex}`}
+                  style={[styles.statsRow, rowIndex === statRows.length - 1 && styles.statsRowLast]}
+                >
+                  {row.map((card) => (
+                    <View key={card.id} style={styles.statCard}>
+                      <View style={[styles.statIconWrapper, { backgroundColor: card.iconBackground }]}>
+                        <Ionicons name={card.icon} size={18} color={card.iconColor} />
+                      </View>
+                      <Text style={styles.statValue}>{card.value}</Text>
+                      <Text style={styles.statLabel}>{card.label}</Text>
+                      <Text style={styles.statHelper}>{card.helper}</Text>
+                    </View>
+                  ))}
                 </View>
               ))}
             </View>
-          ))}
-        </View>
 
-        {/* Compact Summary Card */}
-        <View style={styles.summaryCard}>
-          <View style={styles.summaryHeader}>
-            <View style={styles.summaryIconWrapper}>
-              <Ionicons name="bulb-outline" size={18} color="#ffb347" />
+            {/* Compact Summary Card */}
+            <View style={styles.summaryCard}>
+              <View style={styles.summaryHeader}>
+                <View style={styles.summaryIconWrapper}>
+                  <Ionicons name="bulb-outline" size={18} color="#ffb347" />
+                </View>
+                <Text style={styles.summaryTitle}>Daily Highlights</Text>
+              </View>
+              <Text style={styles.summaryText}>{summaryMessage}</Text>
             </View>
-            <Text style={styles.summaryTitle}>Daily Highlights</Text>
-          </View>
-          <Text style={styles.summaryText}>{summaryMessage}</Text>
-        </View>
 
-        {/* Attendance Marking */}
-        <View style={styles.attendanceSection}>
-          <View style={styles.attendanceHeaderRow}>
-            <Text style={styles.sectionTitle}>Attendance Marking</Text>
-            <TouchableOpacity style={styles.refreshButton} onPress={fetchDashboardStats}>
-              <Ionicons name="refresh" size={16} color="#007bff" />
-              <Text style={styles.refreshButtonText}>Refresh</Text>
-            </TouchableOpacity>
-          </View>
+            {/* Attendance Marking */}
+            <View style={styles.attendanceSection}>
+              <View style={styles.attendanceHeaderRow}>
+                <Text style={styles.sectionTitle}>Attendance Marking</Text>
+                <TouchableOpacity style={styles.refreshButton} onPress={fetchDashboardStats}>
+                  <Ionicons name="refresh" size={16} color="#007bff" />
+                  <Text style={styles.refreshButtonText}>Refresh</Text>
+                </TouchableOpacity>
+              </View>
 
-          {wardEmployees.length === 0 ? (
-            <Text style={styles.attendanceEmpty}>No ward assignments available yet.</Text>
-          ) : (
-            wardEmployees.map(ward => {
-              const isExpanded = expandedAttendanceWards.has(ward.ward_id);
-              const employees = ward.employees || [];
+              {wardEmployees.length === 0 ? (
+                <Text style={styles.attendanceEmpty}>No ward assignments available yet.</Text>
+              ) : (
+                wardEmployees.map(ward => {
+                  const isExpanded = expandedAttendanceWards.has(ward.ward_id);
+                  const employees = ward.employees || [];
 
-              return (
-                <View key={ward.ward_id} style={styles.attendanceCard}>
-                  <TouchableOpacity
-                    style={styles.attendanceCardHeader}
-                    onPress={() => toggleAttendanceWard(ward.ward_id)}
-                    activeOpacity={0.7}
-                  >
-                    <View>
-                      <Text style={styles.attendanceWardName}>{ward.ward_name}</Text>
-                      <Text style={styles.attendanceWardMeta}>
-                        {employees.length} employee{employees.length === 1 ? '' : 's'} • Ward #{ward.ward_id}
-                      </Text>
-                    </View>
-                    <Ionicons
-                      name={isExpanded ? 'chevron-up' : 'chevron-down'}
-                      size={20}
-                      color="#52606d"
-                    />
-                  </TouchableOpacity>
+                  return (
+                    <View key={ward.ward_id} style={styles.attendanceCard}>
+                      <TouchableOpacity
+                        style={styles.attendanceCardHeader}
+                        onPress={() => toggleAttendanceWard(ward.ward_id)}
+                        activeOpacity={0.7}
+                      >
+                        <View>
+                          <Text style={styles.attendanceWardName}>{ward.ward_name}</Text>
+                          <Text style={styles.attendanceWardMeta}>
+                            {employees.length} employee{employees.length === 1 ? '' : 's'} • Ward #{ward.ward_id}
+                          </Text>
+                        </View>
+                        <Ionicons
+                          name={isExpanded ? 'chevron-up' : 'chevron-down'}
+                          size={20}
+                          color="#52606d"
+                        />
+                      </TouchableOpacity>
 
-                  {isExpanded && (
-                    <View style={styles.attendanceEmployeesContainer}>
-                      {employees.length === 0 ? (
-                        <Text style={styles.attendanceEmptyText}>No employees assigned to this ward.</Text>
-                      ) : (
-                        employees.map(employee => {
-                          const punchInKey = `${ward.ward_id}-${employee.emp_id}-in`;
-                          const punchOutKey = `${ward.ward_id}-${employee.emp_id}-out`;
-                          const faceEnrollmentKey = `${ward.ward_id}-${employee.emp_id}`;
-                          const isPunchingIn = punchingMap[punchInKey];
-                          const isPunchingOut = punchingMap[punchOutKey];
-                          const isFaceEnrollmentLoading = faceEnrollmentMap[faceEnrollmentKey];
+                      {isExpanded && (
+                        <View style={styles.attendanceEmployeesContainer}>
+                          {employees.length === 0 ? (
+                            <Text style={styles.attendanceEmptyText}>No employees assigned to this ward.</Text>
+                          ) : (
+                            employees.map(employee => {
+                              const punchInKey = `${ward.ward_id}-${employee.emp_id}-in`;
+                              const punchOutKey = `${ward.ward_id}-${employee.emp_id}-out`;
+                              const isPunchingIn = punchingMap[punchInKey];
+                              const isPunchingOut = punchingMap[punchOutKey];
 
-                          const statusLabel = employee.attendance_status || 'Not Marked';
-                          const statusTheme = getAttendanceStatusTheme(statusLabel);
-                          const hasFaceEnrollment =
-                            employee?.face_verified === true ||
-                            employee?.face_enrolled === true ||
-                            employee?.face_registered === true ||
-                            employee?.faceRegistered === true ||
-                            !!employee?.face_image_url ||
-                            !!employee?.faceImageUrl ||
-                            !!employee?.faceEnrollmentUrl;
+                              const statusLabel = employee.attendance_status || 'Not Marked';
+                              const statusTheme = getAttendanceStatusTheme(statusLabel);
 
-                          return (
-                            <View key={employee.emp_id || employee.emp_code} style={styles.attendanceEmployeeRow}>
-                              <View style={styles.attendanceEmployeeInfo}>
-                                <View style={styles.attendanceEmployeeHeader}>
-                                  <Text style={styles.attendanceEmployeeName}>{employee.emp_name}</Text>
-                                  <View
-                                    style={[styles.attendanceStatusBadge, { backgroundColor: statusTheme.background }]}
-                                    accessibilityRole="text"
-                                    accessibilityLabel={`Current status ${statusLabel}`}
-                                  >
-                                    <Text style={[styles.attendanceStatusText, { color: statusTheme.text }]}>
-                                      {statusLabel}
+                              return (
+                                <View key={employee.emp_id || employee.emp_code} style={styles.attendanceEmployeeRow}>
+                                  <View style={styles.attendanceEmployeeInfo}>
+                                    <View style={styles.attendanceEmployeeHeader}>
+                                      <Text style={styles.attendanceEmployeeName}>{employee.emp_name}</Text>
+                                      <View
+                                        style={[styles.attendanceStatusBadge, { backgroundColor: statusTheme.background }]}
+                                        accessibilityRole="text"
+                                        accessibilityLabel={`Current status ${statusLabel}`}
+                                      >
+                                        <Text style={[styles.attendanceStatusText, { color: statusTheme.text }]}>
+                                          {statusLabel}
+                                        </Text>
+                                      </View>
+                                    </View>
+                                    <Text style={styles.attendanceEmployeeMeta}>
+                                      ID: {employee.emp_code} • {employee.designation || 'Staff'}
                                     </Text>
                                   </View>
-                                </View>
-                                <Text style={styles.attendanceEmployeeMeta}>
-                                  ID: {employee.emp_code} • {employee.designation || 'Staff'}
-                                </Text>
-                              </View>
 
-                              <View style={styles.attendanceActionRow}>
-                                <View style={styles.punchButtonRow}>
-                                  <TouchableOpacity
-                                    style={[styles.punchButton, styles.punchInButton, (isPunchingIn || isPunchingOut) && styles.punchButtonDisabled]}
-                                    onPress={() => openPunchCapture(ward, employee, 'in')}
-                                    disabled={isPunchingIn || isPunchingOut}
-                                    activeOpacity={0.8}
-                                  >
-                                    {isPunchingIn ? (
-                                      <ActivityIndicator size="small" color="#fff" />
-                                    ) : (
-                                      <Text style={styles.punchButtonText}>Punch In</Text>
-                                    )}
-                                  </TouchableOpacity>
+                                  <View style={styles.attendanceActionRow}>
+                                    <View style={styles.punchButtonRow}>
+                                      <TouchableOpacity
+                                        style={[styles.punchButton, styles.punchInButton, (isPunchingIn || isPunchingOut) && styles.punchButtonDisabled]}
+                                        onPress={() => openPunchCapture(ward, employee, 'in')}
+                                        disabled={isPunchingIn || isPunchingOut}
+                                        activeOpacity={0.8}
+                                      >
+                                        {isPunchingIn ? (
+                                          <ActivityIndicator size="small" color="#fff" />
+                                        ) : (
+                                          <Text style={styles.punchButtonText}>Punch In</Text>
+                                        )}
+                                      </TouchableOpacity>
 
-                                  <TouchableOpacity
-                                    style={[styles.punchButton, styles.punchOutButton, (isPunchingIn || isPunchingOut) && styles.punchButtonDisabled]}
-                                    onPress={() => openPunchCapture(ward, employee, 'out')}
-                                    disabled={isPunchingIn || isPunchingOut}
-                                    activeOpacity={0.8}
-                                  >
-                                    {isPunchingOut ? (
-                                      <ActivityIndicator size="small" color="#fff" />
-                                    ) : (
-                                      <Text style={styles.punchButtonText}>Punch Out</Text>
-                                    )}
-                                  </TouchableOpacity>
+                                      <TouchableOpacity
+                                        style={[styles.punchButton, styles.punchOutButton, (isPunchingIn || isPunchingOut) && styles.punchButtonDisabled]}
+                                        onPress={() => openPunchCapture(ward, employee, 'out')}
+                                        disabled={isPunchingIn || isPunchingOut}
+                                        activeOpacity={0.8}
+                                      >
+                                        {isPunchingOut ? (
+                                          <ActivityIndicator size="small" color="#fff" />
+                                        ) : (
+                                          <Text style={styles.punchButtonText}>Punch Out</Text>
+                                        )}
+                                      </TouchableOpacity>
+                                    </View>
+                                  </View>
                                 </View>
-
-                                <View style={styles.faceStoreRow}>
-                                  <TouchableOpacity
-                                    style={[styles.punchButton, styles.faceStoreButton, hasFaceEnrollment && styles.faceStoreButtonSecondary, isFaceEnrollmentLoading && styles.punchButtonDisabled]}
-                                    onPress={() => openFaceEnrollmentCapture(ward, employee)}
-                                    disabled={isFaceEnrollmentLoading || isPunchingIn || isPunchingOut}
-                                    activeOpacity={0.8}
-                                  >
-                                    {isFaceEnrollmentLoading ? (
-                                      <ActivityIndicator size="small" color="#007bff" />
-                                    ) : (
-                                      <Text style={[styles.faceStoreButtonText, hasFaceEnrollment && styles.faceStoreButtonTextSecondary]}>
-                                        {hasFaceEnrollment ? 'Re-upload Face' : 'Store Face'}
-                                      </Text>
-                                    )}
-                                  </TouchableOpacity>
-                                </View>
-                              </View>
-                            </View>
-                          );
-                        })
+                              );
+                            })
+                          )}
+                        </View>
                       )}
                     </View>
-                  )}
-                </View>
-              );
-            })
-          )}
-        </View>
+                  );
+                })
+              )}
+            </View>
 
-        {/* Compact Quick Actions Grid */}
-        <View style={styles.quickActionsSection}>
-          <Text style={styles.sectionTitle}>Quick Actions</Text>
-          <View style={styles.actionGrid}>
-            {quickActions.map((action) => (
-              <TouchableOpacity
-                key={action.id}
-                style={[styles.actionCard, { width: getActionWidth() }]}
-                onPress={action.onPress}
-                activeOpacity={0.7}
-              >
-                <View style={styles.actionIconContainer}>
-                  <Ionicons name={action.icon} size={18} color="#007bff" />
-                </View>
-                <View style={styles.actionContent}>
-                  <Text style={styles.actionTitle}>{action.label}</Text>
-                  <Text style={styles.actionSubtitle}>{action.description}</Text>
-                </View>
-                <Ionicons name="chevron-forward" size={16} color="#b0b6c2" />
-              </TouchableOpacity>
-            ))}
+            {/* Compact Quick Actions Grid */}
+            <View style={styles.quickActionsSection}>
+              <Text style={styles.sectionTitle}>Quick Actions</Text>
+              <View style={styles.actionGrid}>
+                {quickActions.map((action) => (
+                  <TouchableOpacity
+                    key={action.id}
+                    style={[styles.actionCard, { width: getActionWidth() }]}
+                    onPress={action.onPress}
+                    activeOpacity={0.7}
+                  >
+                    <View style={styles.actionIconContainer}>
+                      <Ionicons name={action.icon} size={18} color="#007bff" />
+                    </View>
+                    <View style={styles.actionContent}>
+                      <Text style={styles.actionTitle}>{action.label}</Text>
+                      <Text style={styles.actionSubtitle}>{action.description}</Text>
+                    </View>
+                    <Ionicons name="chevron-forward" size={16} color="#b0b6c2" />
+                  </TouchableOpacity>
+                ))}
+              </View>
+            </View>
           </View>
+
+          <View
+            style={[
+              styles.faceSidebarWrapper,
+              isTwoColumnLayout && styles.faceSidebarWrapperWide,
+            ]}
+          >
+            <View style={styles.faceSidebarCard}>
+              <View style={styles.faceSidebarHeader}>
+                <View style={styles.faceSidebarAvatar}>
+                  <Ionicons name="person-circle-outline" size={28} color="#3f51b5" />
+                </View>
+                <View style={styles.faceSidebarHeaderText}>
+                  <Text style={styles.faceSidebarTitle}>{user?.name || 'Supervisor'}</Text>
+                  <Text style={styles.faceSidebarSubtitle}>Face Enrollment Center</Text>
+                </View>
+              </View>
+
+              <View style={styles.faceSidebarSummaryRow}>
+                <View style={styles.faceSidebarSummaryItem}>
+                  <Text style={styles.faceSidebarSummaryValue}>{totalFaceEnrolled}</Text>
+                  <Text style={styles.faceSidebarSummaryLabel}>Enrolled</Text>
+                </View>
+                <View style={styles.faceSidebarSummaryDivider} />
+                <View style={styles.faceSidebarSummaryItem}>
+                  <Text style={styles.faceSidebarSummaryValue}>{totalFaceCandidates}</Text>
+                  <Text style={styles.faceSidebarSummaryLabel}>Employees</Text>
+                </View>
+              </View>
+
+              <Text style={styles.faceSidebarHint}>
+                {totalFaceCandidates
+                  ? 'Refresh or capture faces without leaving this screen.'
+                  : 'Employees will appear here as soon as wards sync.'}
+              </Text>
+
+              <View style={styles.faceSidebarList}>
+                {faceEnrollmentEntries.length === 0 ? (
+                  <Text style={styles.faceSidebarEmpty}>No employees available for enrollment.</Text>
+                ) : (
+                  faceEnrollmentEntries.map(entry => {
+                  const buttonLabel = entry.hasFaceEnrollment ? 'Manage Face' : 'Store Face';
+                  const disableAction =
+                    entry.isLoading || entry.isPunchBusy || cameraVisible || !!facePreview;
+
+                    return (
+                      <View
+                        key={entry.key}
+                        style={[
+                          styles.faceSidebarRow,
+                          entry.isActive && styles.faceSidebarActiveRow,
+                        ]}
+                      >
+                        <View style={styles.faceSidebarRowHeader}>
+                          <Text style={styles.faceSidebarEmployee}>{entry.employee?.emp_name || 'Employee'}</Text>
+                          <View
+                            style={[
+                              styles.faceStatusChip,
+                              entry.hasFaceEnrollment
+                                ? styles.faceStatusChipSuccess
+                                : styles.faceStatusChipPending,
+                            ]}
+                          >
+                            <Text
+                              style={[
+                                styles.faceStatusChipText,
+                                entry.hasFaceEnrollment
+                                  ? styles.faceStatusChipTextSuccess
+                                  : styles.faceStatusChipTextPending,
+                              ]}
+                            >
+                              {entry.hasFaceEnrollment ? 'Current' : 'Pending'}
+                            </Text>
+                          </View>
+                        </View>
+                        <Text style={styles.faceSidebarRowMeta}>
+                          Ward: {entry.ward?.ward_name || `#${entry.ward?.ward_id}`} • ID: {entry.employee?.emp_code || entry.employee?.emp_id}
+                        </Text>
+                        <View style={styles.faceSidebarActionRow}>
+                          <TouchableOpacity
+                          style={[
+                            styles.faceSidebarActionButton,
+                            entry.hasFaceEnrollment && styles.faceSidebarActionButtonSecondary,
+                            disableAction && styles.faceSidebarActionButtonDisabled,
+                          ]}
+                          onPress={() => handleFaceEnrollmentAction(entry)}
+                          disabled={disableAction}
+                          activeOpacity={0.8}
+                          >
+                            {entry.isLoading ? (
+                              <ActivityIndicator size="small" color="#3f51b5" />
+                            ) : (
+                              <Text
+                                style={[
+                                  styles.faceSidebarActionText,
+                                  entry.hasFaceEnrollment && styles.faceSidebarActionTextSecondary,
+                                ]}
+                              >
+                                {buttonLabel}
+                              </Text>
+                            )}
+                          </TouchableOpacity>
+                        </View>
+                      </View>
+                    );
+                  })
+                )}
+              </View>
+            </View>
         </View>
+      </View>
+
+      {showStartPicker && (
+        <DateTimePicker
+          value={dateRange.start}
+          mode="date"
+          display={Platform.OS === 'ios' ? 'spinner' : 'default'}
+          maximumDate={dateRange.end}
+          onChange={handleStartDateChange}
+        />
+      )}
+
+      {showEndPicker && (
+        <DateTimePicker
+          value={dateRange.end}
+          mode="date"
+          display={Platform.OS === 'ios' ? 'spinner' : 'default'}
+          minimumDate={dateRange.start}
+          onChange={handleEndDateChange}
+        />
+      )}
+
+      {facePreview && (
+        <Modal
+          visible
+          animationType="fade"
+          transparent
+          onRequestClose={closeFacePreview}
+        >
+          <View style={styles.facePreviewOverlay}>
+            <View style={styles.facePreviewCard}>
+              <TouchableOpacity
+                style={styles.facePreviewClose}
+                onPress={closeFacePreview}
+                accessibilityRole="button"
+                accessibilityLabel="Close face preview"
+              >
+                <Ionicons name="close" size={20} color="#1f2933" />
+              </TouchableOpacity>
+              <Text style={styles.facePreviewTitle}>{facePreview.employeeName}</Text>
+              {facePreview.wardName ? (
+                <Text style={styles.facePreviewMeta}>Ward: {facePreview.wardName}</Text>
+              ) : null}
+              {typeof facePreview.confidence === 'number' ? (
+                <Text style={styles.facePreviewMeta}>
+                  Confidence: {facePreview.confidence.toFixed(2)}%
+                </Text>
+              ) : null}
+              <Image
+                source={{ uri: facePreview.imageUrl }}
+                style={styles.facePreviewImage}
+                resizeMode="cover"
+              />
+            </View>
+          </View>
+        </Modal>
+      )}
       </View>
 
       <Modal
@@ -1053,6 +1663,312 @@ const styles = StyleSheet.create({
     maxWidth: 1400,
     alignSelf: 'center',
     width: '100%',
+  },
+  dashboardLayout: {
+    width: '100%',
+    flexDirection: 'column',
+  },
+  dashboardLayoutWide: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+  },
+  dashboardMain: {
+    flex: 1,
+  },
+  dateFilterCard: {
+    backgroundColor: '#ffffff',
+    borderRadius: 16,
+    padding: 16,
+    borderWidth: 1,
+    borderColor: '#e3e7ef',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.05,
+    shadowRadius: 6,
+    elevation: 3,
+    marginBottom: 16,
+  },
+  dateFilterHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 12,
+  },
+  dateFilterTitle: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#1f2933',
+  },
+  dateFilterReset: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#eef2ff',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 12,
+  },
+  dateFilterResetDisabled: {
+    opacity: 0.5,
+  },
+  dateFilterResetText: {
+    marginLeft: 4,
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#3f51b5',
+  },
+  dateFilterRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 10,
+  },
+  dateFilterButton: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#f6f7ff',
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#d9def0',
+  },
+  dateFilterButtonContent: {
+    marginLeft: 8,
+  },
+  dateFilterLabel: {
+    fontSize: 11,
+    color: '#6b778d',
+    textTransform: 'uppercase',
+    letterSpacing: 0.4,
+  },
+  dateFilterValue: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#1f2933',
+  },
+  dateFilterArrow: {
+    marginHorizontal: 4,
+  },
+  faceSidebarWrapper: {
+    width: '100%',
+    marginTop: 16,
+  },
+  faceSidebarWrapperWide: {
+    marginTop: 0,
+    marginLeft: 16,
+    maxWidth: 340,
+    flexShrink: 0,
+  },
+  faceSidebarCard: {
+    backgroundColor: '#ffffff',
+    borderRadius: 16,
+    padding: 16,
+    borderWidth: 1,
+    borderColor: '#e3e7ef',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.05,
+    shadowRadius: 6,
+    elevation: 3,
+  },
+  faceSidebarHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 16,
+  },
+  faceSidebarAvatar: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    backgroundColor: '#e7ecff',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 12,
+  },
+  faceSidebarHeaderText: {
+    flex: 1,
+  },
+  faceSidebarTitle: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: '#1f2933',
+  },
+  faceSidebarSubtitle: {
+    fontSize: 12,
+    color: '#5f6c89',
+    marginTop: 2,
+  },
+  faceSidebarSummaryRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 12,
+  },
+  faceSidebarSummaryItem: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  faceSidebarSummaryValue: {
+    fontSize: 20,
+    fontWeight: '700',
+    color: '#1f2933',
+  },
+  faceSidebarSummaryLabel: {
+    fontSize: 11,
+    color: '#6b778d',
+    marginTop: 2,
+  },
+  faceSidebarSummaryDivider: {
+    width: 1,
+    height: 32,
+    backgroundColor: '#e5e9f2',
+  },
+  faceSidebarHint: {
+    fontSize: 12,
+    color: '#5f6c89',
+    lineHeight: 18,
+    marginBottom: 12,
+  },
+  faceSidebarList: {
+    width: '100%',
+  },
+  faceSidebarEmpty: {
+    fontSize: 12,
+    color: '#6b778d',
+    fontStyle: 'italic',
+  },
+  faceSidebarRow: {
+    backgroundColor: '#f6f7ff',
+    borderRadius: 14,
+    padding: 14,
+    borderWidth: 1,
+    borderColor: 'transparent',
+    marginBottom: 12,
+  },
+  faceSidebarActiveRow: {
+    borderColor: '#3f51b5',
+    backgroundColor: '#eef1ff',
+  },
+  faceSidebarRowHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 6,
+  },
+  faceSidebarEmployee: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#1f2933',
+    flex: 1,
+    marginRight: 12,
+  },
+  faceSidebarRowMeta: {
+    fontSize: 11,
+    color: '#6b778d',
+    marginBottom: 10,
+  },
+  faceSidebarActionRow: {
+    flexDirection: 'row',
+    justifyContent: 'flex-start',
+  },
+  faceSidebarActionButton: {
+    backgroundColor: '#e6f0ff',
+    borderWidth: 1,
+    borderColor: '#c2d4ff',
+    paddingVertical: 8,
+    paddingHorizontal: 14,
+    borderRadius: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+    minHeight: 36,
+  },
+  faceSidebarActionButtonSecondary: {
+    backgroundColor: '#f1f3ff',
+    borderColor: '#c4c7f5',
+  },
+  faceSidebarActionButtonDisabled: {
+    opacity: 0.6,
+  },
+  faceSidebarActionText: {
+    color: '#007bff',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  faceSidebarActionTextSecondary: {
+    color: '#3f51b5',
+  },
+  faceStatusChip: {
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 999,
+    borderWidth: 1,
+  },
+  faceStatusChipSuccess: {
+    borderColor: 'rgba(40, 167, 69, 0.4)',
+    backgroundColor: 'rgba(40, 167, 69, 0.12)',
+  },
+  faceStatusChipPending: {
+    borderColor: 'rgba(255, 143, 31, 0.4)',
+    backgroundColor: 'rgba(255, 143, 31, 0.12)',
+  },
+  faceStatusChipText: {
+    fontSize: 10,
+    fontWeight: '600',
+    textTransform: 'uppercase',
+    letterSpacing: 0.4,
+  },
+  faceStatusChipTextSuccess: {
+    color: '#217a3c',
+  },
+  faceStatusChipTextPending: {
+    color: '#c45d0a',
+  },
+  facePreviewOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(15, 23, 42, 0.6)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 24,
+  },
+  facePreviewCard: {
+    width: '85%',
+    maxWidth: 360,
+    backgroundColor: '#ffffff',
+    borderRadius: 20,
+    padding: 20,
+    alignItems: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.18,
+    shadowRadius: 12,
+    elevation: 8,
+  },
+  facePreviewClose: {
+    position: 'absolute',
+    top: 12,
+    right: 12,
+    padding: 6,
+  },
+  facePreviewTitle: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#1f2933',
+    marginBottom: 6,
+    textAlign: 'center',
+  },
+  facePreviewMeta: {
+    fontSize: 12,
+    color: '#6b778d',
+    marginBottom: 4,
+    textAlign: 'center',
+  },
+  facePreviewImage: {
+    width: '100%',
+    height: 240,
+    borderRadius: 14,
+    marginTop: 16,
   },
   statsGrid: {
     width: '100%',
@@ -1270,12 +2186,6 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     gap: 12,
   },
-  faceStoreRow: {
-    width: '100%',
-    alignItems: 'center',
-    justifyContent: 'center',
-    flexDirection: 'row',
-  },
   punchButton: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1286,23 +2196,6 @@ const styles = StyleSheet.create({
     minHeight: 36,
     minWidth: 108,
     flexShrink: 0,
-  },
-  faceStoreButton: {
-    backgroundColor: '#e6f0ff',
-    borderWidth: 1,
-    borderColor: '#c2d4ff',
-  },
-  faceStoreButtonSecondary: {
-    backgroundColor: '#f1f3ff',
-    borderColor: '#c4c7f5',
-  },
-  faceStoreButtonText: {
-    color: '#007bff',
-    fontSize: 12,
-    fontWeight: '600',
-  },
-  faceStoreButtonTextSecondary: {
-    color: '#3f51b5',
   },
   punchButtonText: {
     color: '#fff',

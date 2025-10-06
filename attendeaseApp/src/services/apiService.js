@@ -75,7 +75,7 @@ export const apiService = {
 
   // Get supervisor employees (wards with employee data)
   // Resolve the supervisor ID from the caller or cached auth data to satisfy backend requirements
-  getSupervisorEmployees: async (userId) => {
+  getSupervisorEmployees: async (userId, options = {}) => {
     let resolvedUserId = userId;
 
     if (!resolvedUserId) {
@@ -91,6 +91,14 @@ export const apiService = {
     }
 
     const requestBody = resolvedUserId ? { user_id: resolvedUserId } : {};
+
+    if (options.startDate) {
+      requestBody.startDate = options.startDate;
+    }
+
+    if (options.endDate) {
+      requestBody.endDate = options.endDate;
+    }
     const response = await api.post(API_ENDPOINTS.SUPERVISOR_WARDS, requestBody);
     const payload = response?.data;
     const normalizedData = Array.isArray(payload)
@@ -226,6 +234,10 @@ export const apiService = {
       }
     }
   },
+
+  getFaceEnrollment: (empId) => api.get(`${API_ENDPOINTS.FACE_ENROLLMENT}/${empId}`),
+
+  deleteFaceEnrollment: (empId) => api.delete(`${API_ENDPOINTS.FACE_ENROLLMENT}/${empId}`),
 
   // Generic API methods
   get: (endpoint, config) => api.get(endpoint, config),

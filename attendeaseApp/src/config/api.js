@@ -98,6 +98,7 @@ export const API_ENDPOINTS = {
   FETCH_IMAGE: '/app/attendance/employee/image',
   FACE_ATTENDANCE: '/app/attendance/employee/face-attendance',
   STORE_FACE: '/app/attendance/employee/faceRoutes/store-face',
+  FACE_ENROLLMENT: '/app/attendance/employee/faceRoutes',
 };
 
 export const createApiUrl = (endpoint) => `${API_CONFIG.BASE_URL}${endpoint}`;

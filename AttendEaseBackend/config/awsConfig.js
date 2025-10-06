@@ -3,6 +3,7 @@ const {
   RekognitionClient,
   IndexFacesCommand,
   CreateCollectionCommand,
+  DeleteFacesCommand,
   CompareFacesCommand,
   SearchFacesByImageCommand,
 } = require("@aws-sdk/client-rekognition");
@@ -11,6 +12,7 @@ const {
   DeleteObjectCommand,
   PutObjectCommand,
   GetObjectCommand,
+  HeadObjectCommand,
 } = require("@aws-sdk/client-s3");
 
 // Initialize AWS clients
@@ -36,9 +38,11 @@ module.exports = {
   s3,
   IndexFacesCommand,
   CreateCollectionCommand,
+  DeleteFacesCommand,
   CompareFacesCommand,
   SearchFacesByImageCommand,
   DeleteObjectCommand,
   PutObjectCommand,
   GetObjectCommand,
+  HeadObjectCommand,
 };
