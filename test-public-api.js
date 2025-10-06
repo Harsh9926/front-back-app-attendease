@@ -3,7 +3,7 @@
 const https = require('https');
 const http = require('http');
 
-const PUBLIC_API_BASE = 'http://13.202.210.74:5000/api';
+const PUBLIC_API_BASE = 'http://localhost:5003/api';
 
 // Test endpoints from the final API documentation
 const testEndpoints = [
@@ -99,10 +99,11 @@ async function runTests() {
 
   console.log('📱 Mobile App Configuration:');
   console.log(`   API Base URL: ${PUBLIC_API_BASE}`);
-  console.log(`   Environment: Production (Public API)`);
-  console.log(`   Local Backend: Not required`);
+  console.log('   Environment: Local development');
+  console.log('   Local Backend: Required (AttendEaseBackend running)');
   console.log('');
-  console.log('🚀 Ready to start mobile app with: ./start-mobile-only.sh');
+  console.log('🚀 Start backend with: ./start-backend.sh');
+  console.log('📱 Launch mobile app with: ./start-mobile-only.sh');
 }
 
 runTests().catch(console.error);

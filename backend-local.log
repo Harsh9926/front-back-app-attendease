@@ -1,0 +1,3 @@
+🚀 Starting AttendEaseBackend on port 5003
+Server running on port 5003
+./start-backend.sh: line 16: 43791 Killed: 9               node app.js

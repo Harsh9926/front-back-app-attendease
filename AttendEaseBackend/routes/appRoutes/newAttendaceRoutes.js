@@ -4,10 +4,16 @@ const router = express.Router();
 const pool = require("../../config/db");
 const multer = require("multer");
 const fs = require("fs");
-const path = require("path");
-const { uploadImageToB2 } = require("../../utils/b2Storage");
+const {
+  uploadAttendanceImage,
+  isLocalImage,
+  getLocalImagePath,
+  isS3Image,
+  extractS3Key,
+  getS3ImageStream,
+} = require("../../utils/s3Storage");
 
-const { rekognition } = require("../../config/awsConfig");
+const { rekognition, CreateCollectionCommand } = require("../../config/awsConfig");
 const { SearchFacesByImageCommand } = require("@aws-sdk/client-rekognition");
 
 // Constants
@@ -19,6 +25,86 @@ const PUNCH_TYPES = {
 // Set up Multer for file uploads
 const storage = multer.memoryStorage();
 const upload = multer({ storage: storage });
+
+// Utility helpers
+const resolveCollectionId = () => {
+  const id =
+    (process.env.REKOGNITION_COLLECTION || "").trim() ||
+    (process.env.REKOGNITION_COLLECTION_ID || "").trim();
+  return id || null;
+};
+
+let faceCollectionReady = false;
+
+const ensureCollectionExists = async (collectionId) => {
+  if (faceCollectionReady) {
+    return;
+  }
+
+  try {
+    await rekognition.send(
+      new CreateCollectionCommand({
+        CollectionId: collectionId,
+      })
+    );
+    console.log(`Created Rekognition collection "${collectionId}".`);
+  } catch (error) {
+    if (error.name !== "ResourceAlreadyExistsException") {
+      throw error;
+    }
+  }
+
+  faceCollectionReady = true;
+};
+
+const normalizeId = (value) => {
+  if (value === undefined || value === null) {
+    return null;
+  }
+
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+};
+
+const mapRekognitionError = (error) => {
+  const message = error?.message || "Face recognition failed";
+  const lower = message.toLowerCase();
+
+  if (lower.includes("no faces") || lower.includes("no face")) {
+    return {
+      status: 422,
+      payload: {
+        error: "No face detected in the image",
+        details: message,
+        suggestion: "Ensure the employee's face is centered and well lit, then retry.",
+      },
+    };
+  }
+
+  if (error.name === "ResourceNotFoundException") {
+    return {
+      status: 500,
+      payload: {
+        error: "Rekognition collection not found",
+        details: message,
+        solution:
+          "Recreate the collection or verify REKOGNITION_COLLECTION in the backend .env file.",
+      },
+    };
+  }
+
+  return {
+    status: error.$metadata?.httpStatusCode || 500,
+    payload: {
+      error: "Face recognition failed",
+      details: message,
+    },
+  };
+};
 
 // Utility functions
 function formatDate(date = new Date()) {
@@ -118,7 +204,7 @@ async function processPunch(
   let imageUrl = null;
 
   if (imageFile) {
-    imageUrl = await uploadImageToB2(
+    imageUrl = await uploadAttendanceImage(
       imageFile.buffer,
       `attendance_${attendanceId}_${punchType}.jpg`
     );
@@ -142,7 +228,7 @@ async function processPunch(
     locationData.longitude,
     locationData.address,
     imageUrl,
-    userId,
+    await resolvePunchActor(userId),
     attendanceId,
   ]);
 
@@ -151,6 +237,28 @@ async function processPunch(
   }
 
   return result.rows[0];
+}
+
+async function resolvePunchActor(rawUserId) {
+  const normalized = normalizeId(rawUserId);
+  if (normalized === null) {
+    return null;
+  }
+
+  try {
+    const { rows } = await pool.query(
+      "SELECT user_id FROM users WHERE user_id = $1",
+      [normalized]
+    );
+
+    if (rows.length > 0) {
+      return normalized;
+    }
+  } catch (error) {
+    console.error("resolvePunchActor error:", error);
+  }
+
+  return null;
 }
 
 // Routes
@@ -246,10 +354,10 @@ router.get("/image", async (req, res) => {
     }
 
     const imageUrl = result.rows[0].image_url;
+    const downloadName = `attendance_${attendance_id}_${punch_type}.jpg`;
 
-    if (imageUrl.startsWith("/uploads/")) {
-      const relativePath = imageUrl.replace(/^\//, "");
-      const filePath = path.join(__dirname, "../../", relativePath);
+    if (isLocalImage(imageUrl)) {
+      const filePath = getLocalImagePath(imageUrl);
 
       if (!fs.existsSync(filePath)) {
         return res.status(404).json({ error: "Image not found" });
@@ -257,49 +365,49 @@ router.get("/image", async (req, res) => {
 
       res.set({
         "Content-Type": "image/jpeg",
-        "Content-Disposition": `inline; filename="attendance_${attendance_id}_${punch_type}.jpg"`,
+        "Content-Disposition": `inline; filename="${downloadName}"`,
       });
 
       return fs.createReadStream(filePath).pipe(res);
     }
 
-    const isB2Image = imageUrl.includes("backblazeb2.com");
+    if (isS3Image(imageUrl)) {
+      const key = extractS3Key(imageUrl);
 
-    if (isB2Image) {
-      const authResponse = await axios.post(
-        "https://api.backblazeb2.com/b2api/v2/b2_authorize_account",
-        {},
-        {
-          auth: {
-            username: process.env.B2_APPLICATION_KEY_ID,
-            password: process.env.B2_APPLICATION_KEY,
-          },
-        }
-      );
+      if (!key) {
+        return res.status(404).json({ error: "Image not found" });
+      }
 
+      try {
+        const { stream, contentType } = await getS3ImageStream(key);
+
+        res.set({
+          "Content-Type": contentType,
+          "Content-Disposition": `inline; filename="${downloadName}"`,
+        });
+
+        return stream.pipe(res);
+      } catch (error) {
+        console.error("Error streaming S3 image:", error);
+        return res.status(500).json({ error: "Unable to fetch image from S3" });
+      }
+    }
+
+    if (imageUrl?.startsWith("http")) {
       const imageResponse = await axios.get(imageUrl, {
-        headers: { Authorization: authResponse.data.authorizationToken },
         responseType: "stream",
       });
 
       res.set({
-        "Content-Type": "image/jpeg",
-        "Content-Disposition": `inline; filename="attendance_${attendance_id}_${punch_type}.jpg"`,
+        "Content-Type":
+          imageResponse.headers["content-type"] || "image/jpeg",
+        "Content-Disposition": `inline; filename="${downloadName}"`,
       });
 
-      imageResponse.data.pipe(res);
+      return imageResponse.data.pipe(res);
     }
 
-    const imageResponse = await axios.get(imageUrl, {
-      responseType: "stream",
-    });
-
-    res.set({
-      "Content-Type": "image/jpeg",
-      "Content-Disposition": `inline; filename="attendance_${attendance_id}_${punch_type}.jpg"`,
-    });
-
-    imageResponse.data.pipe(res);
+    res.status(404).json({ error: "Image not found" });
   } catch (error) {
     console.error("Error fetching image:", error);
     res.status(500).json({ error: "Internal Server Error" });
@@ -308,11 +416,36 @@ router.get("/image", async (req, res) => {
 
 router.post("/face-attendance", upload.single("image"), async (req, res) => {
   try {
-    const { punch_type, latitude, longitude, userId, address } = req.body;
+    const {
+      punch_type,
+      latitude,
+      longitude,
+      userId,
+      address,
+      emp_id: rawEmpId,
+      employeeId: rawEmployeeId,
+    } = req.body;
+
+    if (!req.file) {
+      return res.status(400).json({
+        error: "Face image is required",
+      });
+    }
+
+    const collectionId = resolveCollectionId();
+    if (!collectionId) {
+      return res.status(500).json({
+        error: "Rekognition collection is not configured",
+        details:
+          "Set REKOGNITION_COLLECTION or REKOGNITION_COLLECTION_ID in the backend .env file.",
+      });
+    }
+
+    await ensureCollectionExists(collectionId);
 
     // Face detection logic
     const searchParams = {
-      CollectionId: process.env.REKOGNITION_COLLECTION,
+      CollectionId: collectionId,
       Image: { Bytes: req.file.buffer },
       MaxFaces: 1,
       FaceMatchThreshold: 90,
@@ -328,20 +461,62 @@ router.post("/face-attendance", upload.single("image"), async (req, res) => {
       });
     }
 
-    const faceId = result.FaceMatches[0].Face.FaceId;
-    const { rows } = await pool.query(
+    const matchedFace = result.FaceMatches[0]?.Face ?? {};
+    const faceId = matchedFace.FaceId;
+    const matchedExternalId = normalizeId(matchedFace.ExternalImageId);
+    const requestedEmpId = normalizeId(rawEmpId ?? rawEmployeeId);
+
+    let employeeRecord = null;
+
+    const byFaceId = await pool.query(
       "SELECT emp_id, name FROM employee WHERE face_id = $1",
       [faceId]
     );
 
-    if (!rows.length) {
+    if (byFaceId.rows.length) {
+      employeeRecord = byFaceId.rows[0];
+    } else {
+      if (matchedExternalId !== null) {
+        const byExternalId = await pool.query(
+          "SELECT emp_id, name FROM employee WHERE emp_id = $1",
+          [matchedExternalId]
+        );
+
+        if (byExternalId.rows.length) {
+          employeeRecord = byExternalId.rows[0];
+        }
+      }
+
+      if (!employeeRecord && requestedEmpId !== null) {
+        const byRequest = await pool.query(
+          "SELECT emp_id, name FROM employee WHERE emp_id = $1",
+          [requestedEmpId]
+        );
+
+        if (byRequest.rows.length) {
+          employeeRecord = byRequest.rows[0];
+        }
+      }
+
+      if (employeeRecord) {
+        await pool.query(
+          `UPDATE employee
+           SET face_id = $1
+           WHERE emp_id = $2
+             AND (face_id IS NULL OR face_id <> $1)`,
+          [faceId, employeeRecord.emp_id]
+        );
+      }
+    }
+
+    if (!employeeRecord) {
       return res.status(404).json({
         error: "Employee not registered in system",
         solution: "Register face first via /store-face",
       });
     }
 
-    const emp_id = rows[0].emp_id;
+    const emp_id = employeeRecord.emp_id;
     const today = formatDate();
     const attendance = await getOrCreateAttendanceRecord(emp_id, today);
 
@@ -366,7 +541,7 @@ router.post("/face-attendance", upload.single("image"), async (req, res) => {
 
     res.json({
       success: true,
-      employee: rows[0].name,
+      employee: employeeRecord.name,
       punch_type,
       time:
         punch_type === PUNCH_TYPES.IN
@@ -374,10 +549,9 @@ router.post("/face-attendance", upload.single("image"), async (req, res) => {
           : updated.punch_out_time,
     });
   } catch (error) {
-    res.status(500).json({
-      error: "There are no faces in the image",
-      fallback_route: "POST /attendance",
-    });
+    console.error("Face attendance error:", error);
+    const { status, payload } = mapRekognitionError(error);
+    res.status(status).json(payload);
   }
 });
 

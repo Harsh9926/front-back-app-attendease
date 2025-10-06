@@ -1,31 +1,28 @@
 #!/bin/bash
 
-echo "🚀 Starting AttendEase Mobile App (Public API Mode)..."
+echo "🚀 Starting AttendEase Mobile App (Local API mode)..."
 
-# Test public API connectivity
-echo "🔍 Testing public API connection..."
-curl -s http://13.202.210.74:5000/api > /dev/null
+# Verify local backend connectivity (optional but helpful)
+echo "🔍 Checking local backend at http://localhost:5003 ..."
+curl -s http://localhost:5003/ > /dev/null
 if [ $? -eq 0 ]; then
-    echo "✅ Public API is accessible at http://13.202.210.74:5000"
+    echo "✅ AttendEaseBackend is reachable on http://localhost:5003"
 else
-    echo "⚠️  Warning: Public API may not be accessible. Check your internet connection."
-    echo "   The app will still start but may not function properly."
+    echo "⚠️  Warning: AttendEaseBackend is not responding on http://localhost:5003"
+    echo "   Start the backend first (./start-backend.sh) to use the mobile app against local APIs."
 fi
 
 echo ""
 echo "📱 Starting mobile app..."
-echo "🌐 Using public API: http://13.202.210.74:5000"
+echo "🌐 Using API base URL from attendeaseApp/.env"
 echo ""
 
-# Start mobile app
 cd attendeaseApp
 npx expo start --clear
 
-# Cleanup function
 cleanup() {
     echo "🛑 Stopping mobile app..."
     exit 0
 }
 
-# Set trap to cleanup on exit
 trap cleanup EXIT INT TERM

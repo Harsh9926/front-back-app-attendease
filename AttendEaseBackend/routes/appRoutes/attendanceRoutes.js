@@ -1,11 +1,17 @@
 const express = require("express");
 const axios = require("axios");
 const fs = require("fs");
-const path = require("path");
 const router = express.Router();
 const pool = require("../../config/db");
 const multer = require("multer");
-const { uploadImageToB2 } = require("../../utils/b2Storage");
+const {
+  uploadAttendanceImage,
+  isLocalImage,
+  getLocalImagePath,
+  isS3Image,
+  extractS3Key,
+  getS3ImageStream,
+} = require("../../utils/s3Storage");
 
 // Set up Multer for file uploads
 const storage = multer.memoryStorage();
@@ -147,7 +153,7 @@ router.put("/", upload.single("image"), async (req, res) => {
     // Upload image directly as binary if provided
     if (req.file) {
       // Upload the raw buffer directly without base64 conversion
-      imageUrl = await uploadImageToB2(
+      imageUrl = await uploadAttendanceImage(
         req.file.buffer, // Direct binary buffer
         `attendance_${attendance_id}_${punch_type}.jpg`
       );
@@ -217,10 +223,10 @@ router.get("/image", async (req, res) => {
     }
 
     const imageUrl = result.rows[0].image_url;
+    const downloadName = `attendance_${attendance_id}_${punch_type}.jpg`;
 
-    if (imageUrl.startsWith("/uploads/")) {
-      const relativePath = imageUrl.replace(/^\//, "");
-      const filePath = path.join(__dirname, "../../", relativePath);
+    if (isLocalImage(imageUrl)) {
+      const filePath = getLocalImagePath(imageUrl);
 
       if (!fs.existsSync(filePath)) {
         return res.status(404).json({ error: "Image not found" });
@@ -228,48 +234,49 @@ router.get("/image", async (req, res) => {
 
       res.set({
         "Content-Type": "image/jpeg",
-        "Content-Disposition": `inline; filename="attendance_${attendance_id}_${punch_type}.jpg"`,
+        "Content-Disposition": `inline; filename="${downloadName}"`,
       });
 
       return fs.createReadStream(filePath).pipe(res);
     }
 
-    const isB2Image = imageUrl.includes("backblazeb2.com");
+    if (isS3Image(imageUrl)) {
+      const key = extractS3Key(imageUrl);
 
-    let imageResponse;
+      if (!key) {
+        return res.status(404).json({ error: "Image not found" });
+      }
 
-    if (isB2Image) {
-      const authResponse = await axios.post(
-        "https://api.backblazeb2.com/b2api/v2/b2_authorize_account",
-        {},
-        {
-          auth: {
-            username: process.env.B2_APPLICATION_KEY_ID,
-            password: process.env.B2_APPLICATION_KEY,
-          },
-        }
-      );
+      try {
+        const { stream, contentType } = await getS3ImageStream(key);
 
-      const authToken = authResponse.data.authorizationToken;
+        res.set({
+          "Content-Type": contentType,
+          "Content-Disposition": `inline; filename="${downloadName}"`,
+        });
 
-      imageResponse = await axios.get(imageUrl, {
-        headers: {
-          Authorization: authToken,
-        },
-        responseType: "stream",
-      });
+        return stream.pipe(res);
+      } catch (error) {
+        console.error("Error streaming S3 image:", error);
+        return res.status(500).json({ error: "Unable to fetch image from S3" });
+      }
     }
 
-    imageResponse = await axios.get(imageUrl, {
-      responseType: "stream",
-    });
+    if (imageUrl?.startsWith("http")) {
+      const imageResponse = await axios.get(imageUrl, {
+        responseType: "stream",
+      });
 
-    res.set({
-      "Content-Type": "image/jpeg",
-      "Content-Disposition": `inline; filename="attendance_${attendance_id}_${punch_type}.jpg"`,
-    });
+      res.set({
+        "Content-Type":
+          imageResponse.headers["content-type"] || "image/jpeg",
+        "Content-Disposition": `inline; filename="${downloadName}"`,
+      });
 
-    imageResponse.data.pipe(res);
+      return imageResponse.data.pipe(res);
+    }
+
+    res.status(404).json({ error: "Image not found" });
   } catch (error) {
     console.error("Error fetching image:", error);
     res.status(500).json({ error: "Internal Server Error" });

@@ -245,7 +245,7 @@ export class AttendanceService {
     }
   }
 
-  async storeFaceData(userId) {
+  async storeFaceData(userId, employeeId = null) {
     try {
       // Capture face photo for enrollment
       const photo = await this.capturePhoto({
@@ -261,6 +261,9 @@ export class AttendanceService {
       // Prepare form data
       const formData = new FormData();
       formData.append('userId', userId.toString());
+      if (employeeId) {
+        formData.append('emp_id', employeeId.toString());
+      }
       
       // Add face image
       formData.append('image', {

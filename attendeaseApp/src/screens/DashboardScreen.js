@@ -446,6 +446,9 @@ const DashboardScreen = () => {
       try {
         const formData = new FormData();
         formData.append('userId', employeeUserId.toString());
+        if (employeeId) {
+          formData.append('emp_id', employeeId.toString());
+        }
         formData.append('image', buildImageFile('face-store'));
 
         const response = await apiService.storeFace(formData);
@@ -484,30 +487,6 @@ const DashboardScreen = () => {
     setPunchingMap(prev => ({ ...prev, [attendanceKey]: true }));
 
     try {
-      const storeFormData = new FormData();
-      storeFormData.append('userId', employeeUserId.toString());
-      storeFormData.append('image', buildImageFile('face-enroll'));
-
-      try {
-        const storeResponse = await apiService.storeFace(storeFormData);
-        const storeMessage =
-          storeResponse?.data?.message ||
-          storeResponse?.data?.status ||
-          null;
-
-        if (storeMessage) {
-          console.log('Face enrollment before attendance:', storeMessage);
-        }
-      } catch (storeError) {
-        console.error('Automatic face store before attendance failed:', storeError);
-        const storeMessage =
-          storeError.response?.data?.message ||
-          storeError.response?.data?.error ||
-          'Unable to store face image. Please try again.';
-        Alert.alert('Face Enrollment', storeMessage);
-        return;
-      }
-
       try {
         locationData = await attendanceService.getCurrentLocation();
       } catch (error) {
