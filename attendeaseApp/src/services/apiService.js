@@ -128,6 +128,143 @@ export const apiService = {
     };
   },
 
+  getSupervisorSummary: async (options = {}) => {
+    const normalizeSummary = (value) => {
+      if (!value || typeof value !== 'object') {
+        return null;
+      }
+
+      const coerceNumber = (input, fallback = 0) => {
+        const numeric = Number(input);
+        return Number.isFinite(numeric) ? numeric : fallback;
+      };
+
+      const totalEmployees = coerceNumber(
+        value.totalEmployees ??
+          value.total_employees ??
+          value.total ??
+          value.totalCount
+      );
+      const inProgress = coerceNumber(
+        value.inProgress ??
+          value.presentToday ??
+          value.present ??
+          value.in_progress ??
+          value.inProgressCount
+      );
+      const marked = coerceNumber(
+        value.marked ??
+          value.markedCount ??
+          value.marked_count ??
+          value.completed ??
+          value.completedCount
+      );
+      const notMarked = coerceNumber(
+        value.notMarked ??
+          value.not_marked ??
+          value.absent ??
+          value.pending ??
+          value.pendingCount
+      );
+      const attendanceRate = coerceNumber(
+        value.attendanceRate ?? value.attendance_rate
+      );
+
+      return {
+        totalEmployees,
+        inProgress,
+        marked,
+        notMarked,
+        attendanceRate,
+      };
+    };
+
+    const extractSummary = (payload) => {
+      if (!payload || typeof payload !== 'object') {
+        return null;
+      }
+
+      const candidate =
+        (!Array.isArray(payload.data) && typeof payload.data === 'object'
+          ? payload.data
+          : null) ||
+        (!Array.isArray(payload.summary) && typeof payload.summary === 'object'
+          ? payload.summary
+          : null) ||
+        (payload.success === undefined && !Array.isArray(payload)
+          ? payload
+          : null);
+
+      return normalizeSummary(candidate);
+    };
+
+    const startDate = options.startDate;
+    const endDate = options.endDate;
+
+    const params = {};
+    if (startDate) {
+      params.startDate = startDate;
+    }
+    if (endDate) {
+      params.endDate = endDate;
+    }
+
+    try {
+      const response = await api.get(API_ENDPOINTS.SUPERVISOR_SUMMARY, {
+        params,
+      });
+      const payload = response?.data ?? {};
+      const data = extractSummary(payload);
+
+      const successFlag =
+        payload?.success !== undefined ? !!payload.success : !!data;
+      const message = payload?.message || payload?.error || null;
+
+      return {
+        success: successFlag,
+        data,
+        message,
+        raw: payload,
+      };
+    } catch (getError) {
+      if (!options.userId) {
+        throw getError;
+      }
+
+      try {
+        const requestBody = {
+          user_id: options.userId,
+        };
+        if (startDate) {
+          requestBody.startDate = startDate;
+        }
+        if (endDate) {
+          requestBody.endDate = endDate;
+        }
+
+        const response = await api.post(
+          API_ENDPOINTS.SUPERVISOR_SUMMARY,
+          requestBody
+        );
+        const payload = response?.data ?? {};
+        const data = extractSummary(payload);
+
+        const successFlag =
+          payload?.success !== undefined ? !!payload.success : !!data;
+        const message = payload?.message || payload?.error || null;
+
+        return {
+          success: successFlag,
+          data,
+          message,
+          raw: payload,
+        };
+      } catch (postError) {
+        throw postError;
+      }
+    }
+  },
+
   // 👷 Employee Attendance
   getEmployeeAttendance: (empId, wardId, date) =>
     api.post(API_ENDPOINTS.EMPLOYEE_ATTENDANCE, {

@@ -49,6 +49,7 @@ const DashboardScreen = () => {
     presentToday: 0,
     markedCount: 0,
     totalWards: 0,
+    absentCount: 0,
   });
   const [wardEmployees, setWardEmployees] = useState([]);
   const [expandedAttendanceWards, setExpandedAttendanceWards] = useState(new Set());
@@ -305,51 +306,94 @@ const DashboardScreen = () => {
     try {
       console.log('Fetching dashboard stats...');
       const supervisorId = user?.user_id ?? user?.id ?? user?.userId ?? null;
-      const { success, data, message, raw } = await apiService.getSupervisorEmployees(supervisorId, {
-        startDate: toISODate(dateRange.start),
-        endDate: toISODate(dateRange.end),
+
+      if (!supervisorId) {
+        console.warn('Cannot fetch dashboard stats: missing supervisor ID');
+        return;
+      }
+
+      const startDate = toISODate(dateRange.start);
+      const endDate = toISODate(dateRange.end);
+
+      const [summaryResult, employeesResult] = await Promise.all([
+        apiService
+          .getSupervisorSummary({ userId: supervisorId, startDate, endDate })
+          .catch((error) => {
+            console.error('Supervisor summary error:', error);
+            return { success: false, data: null, error };
+          }),
+        apiService
+          .getSupervisorEmployees(supervisorId, { startDate, endDate })
+          .catch((error) => {
+            console.error('Supervisor employees error:', error);
+            return { success: false, data: [], message: error?.message, error };
+          }),
+      ]);
+
+      const wardsData = employeesResult?.success ? employeesResult.data || [] : [];
+
+      let computedTotalEmployees = 0;
+      let computedPresent = 0;
+      let computedMarked = 0;
+
+      wardsData.forEach((ward) => {
+        const employees = ward.employees || [];
+        computedTotalEmployees += employees.length;
+        employees.forEach((emp) => {
+          const status = (emp?.attendance_status || '').toString().trim().toLowerCase();
+          if (status === 'present') {
+            computedPresent += 1;
+          } else if (status.includes('marked')) {
+            computedMarked += 1;
+          }
+        });
       });
-      console.log('Dashboard API Response:', raw);
 
-      if (success) {
-        const wardsData = data || [];
-        let totalEmployees = 0;
-        let presentCount = 0;
-        let markedCount = 0;
+      const computedAbsent = Math.max(
+        computedTotalEmployees - (computedPresent + computedMarked),
+        0
+      );
 
-        wardsData.forEach(ward => {
-          const employees = ward.employees || [];
-          totalEmployees += employees.length;
-          employees.forEach(emp => {
-            const status = (emp?.attendance_status || '').toString().toLowerCase();
-            if (status === 'present') {
-              presentCount += 1;
-            } else if (status.includes('marked')) {
-              markedCount += 1;
-            }
-          });
-        });
+      const summaryData =
+        summaryResult?.success && summaryResult.data ? summaryResult.data : null;
 
-        setStats({
-          totalEmployees,
-          presentToday: presentCount,
-          markedCount,
-          totalWards: wardsData.length,
-        });
+      const resolveNumber = (value, fallback = 0) =>
+        typeof value === 'number' && Number.isFinite(value) ? value : fallback;
 
-        setWardEmployees(wardsData);
+      const totalEmployees = resolveNumber(
+        summaryData?.totalEmployees,
+        computedTotalEmployees
+      );
+      const presentToday = resolveNumber(summaryData?.inProgress, computedPresent);
+      const markedCount = resolveNumber(summaryData?.marked, computedMarked);
 
-        console.log('Stats updated:', {
-          totalEmployees,
-          present: presentCount,
-          marked: markedCount,
-          totalWards: wardsData.length,
-        });
-      } else {
-        console.error('Dashboard API returned success: false', raw);
-        if (message) {
-          Alert.alert('Dashboard', message);
-        }
+      const absentCount = resolveNumber(
+        summaryData?.notMarked,
+        Math.max(totalEmployees - (presentToday + markedCount), computedAbsent)
+      );
+
+      setStats({
+        totalEmployees,
+        presentToday,
+        markedCount,
+        totalWards: wardsData.length,
+        absentCount,
+      });
+
+      setWardEmployees(wardsData);
+
+      console.log('Stats updated:', {
+        totalEmployees,
+        present: presentToday,
+        marked: markedCount,
+        absent: absentCount,
+        totalWards: wardsData.length,
+      });
+
+      if (!employeesResult?.success && employeesResult?.message) {
+        Alert.alert('Dashboard', employeesResult.message);
+      } else if (!summaryResult?.success && summaryResult?.message) {
+        Alert.alert('Dashboard', summaryResult.message);
       }
     } catch (error) {
       console.error('Error fetching dashboard stats:', error);
@@ -784,7 +828,7 @@ Please delete the existing face from the Face Enrollment Center before capturing
     let count = 0;
     wardEmployees.forEach(ward => {
       (ward?.employees || []).forEach(employee => {
-        const status = (employee?.attendance_status || '').toString().toLowerCase();
+        const status = (employee?.attendance_status || '').toString().trim().toLowerCase();
         if (status.includes('marked')) {
           count += 1;
         }
@@ -810,7 +854,7 @@ Please delete the existing face from the Face Enrollment Center before capturing
   }, [dateRange, todayIso]);
 
   const summaryMessage = stats.totalEmployees > 0
-    ? `${markedAttendanceCount} employees fully marked and ${stats.presentToday} still in progress between ${formattedRangeLabel}. Tracking ${stats.totalEmployees} team members across your wards.`
+    ? `${markedAttendanceCount} employees fully marked, ${stats.presentToday} in progress, and ${stats.absentCount} still pending between ${formattedRangeLabel}. Tracking ${stats.totalEmployees} team members across your wards.`
     : 'No employees have been assigned yet. Once your team is connected, you\'ll see live attendance insights here.';
 
   const statHighlights = [
@@ -840,6 +884,15 @@ Please delete the existing face from the Face Enrollment Center before capturing
       iconColor: '#ff8f1f',
       iconBackground: 'rgba(255, 143, 31, 0.12)',
       helper: 'Fully completed in range',
+    },
+    {
+      id: 'absent-today',
+      label: 'Not Marked',
+      value: stats.absentCount,
+      icon: 'alert-circle',
+      iconColor: '#dc3545',
+      iconBackground: 'rgba(220, 53, 69, 0.12)',
+      helper: 'No punches recorded yet',
     },
     {
       id: 'attendance-rate',

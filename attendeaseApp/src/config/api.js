@@ -91,6 +91,7 @@ export const API_ENDPOINTS = {
   LOGOUT: '/auth/logout',
   CITIES: '/cities',
   SUPERVISOR_WARDS: '/app/supervisor/wards',
+  SUPERVISOR_SUMMARY: '/app/supervisor/wards/summary',
   EMPLOYEE_ATTENDANCE: '/app/attendance/employee',
   PUNCH_IN_OUT: '/app/attendance/employee',
   ATTENDANCE_RECORD: '/attendance',
