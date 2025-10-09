@@ -376,6 +376,31 @@ export const apiService = {
 
   deleteFaceEnrollment: (empId) => api.delete(`${API_ENDPOINTS.FACE_ENROLLMENT}/${empId}`),
 
+  getFaceGallery: async (params = {}) => {
+    const response = await api.get(API_ENDPOINTS.FACE_GALLERY, { params });
+    const payload = response?.data;
+    const images = Array.isArray(payload?.images)
+      ? payload.images
+      : Array.isArray(payload?.data)
+        ? payload.data
+        : Array.isArray(payload)
+          ? payload
+          : [];
+
+    const successFlag =
+      payload?.success !== undefined
+        ? !!payload.success
+        : images.length > 0;
+
+    return {
+      success: successFlag,
+      data: images,
+      bucket: payload?.bucket ?? null,
+      prefix: payload?.prefix ?? null,
+      raw: payload,
+    };
+  },
+
   // Generic API methods
   get: (endpoint, config) => api.get(endpoint, config),
   post: (endpoint, data, config) => api.post(endpoint, data, config),

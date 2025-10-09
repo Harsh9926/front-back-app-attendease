@@ -62,44 +62,210 @@ const FaceGalleryScreen = ({ navigation }) => {
   const [selected, setSelected] = useState(null);
 
   const fetchGallery = useCallback(async () => {
-    try {
-      setLoading(true);
-      const supervisorId = user?.user_id ?? user?.id ?? user?.userId ?? null;
-      const { success, data, message } = await apiService.getSupervisorEmployees(supervisorId);
+    setLoading(true);
 
-      if (!success) {
-        console.warn('FaceGalleryScreen: getSupervisorEmployees returned success=false', message);
-        setGallery([]);
-        return;
+    try {
+      const supervisorId = user?.user_id ?? user?.id ?? user?.userId ?? null;
+      const [employeesResponse, facesResponse] = await Promise.allSettled([
+        apiService.getSupervisorEmployees(supervisorId),
+        apiService.getFaceGallery(),
+      ]);
+
+      const employeesPayload =
+        employeesResponse.status === 'fulfilled' && employeesResponse.value?.success
+          ? employeesResponse.value.data || []
+          : [];
+
+      if (employeesResponse.status === 'rejected') {
+        console.warn(
+          'FaceGalleryScreen: getSupervisorEmployees rejected',
+          employeesResponse.reason?.message || employeesResponse.reason
+        );
+      } else if (employeesResponse.value && !employeesResponse.value.success) {
+        console.warn(
+          'FaceGalleryScreen: getSupervisorEmployees returned success=false',
+          employeesResponse.value?.message
+        );
       }
 
-      const wards = (data || []).map(ward => {
-        const employeesWithImages = (ward.employees || [])
-          .map(employee => {
-            const imageUrl = extractFaceImage(employee);
-            if (!imageUrl) {
-              return null;
+      const faceImages =
+        facesResponse.status === 'fulfilled' && facesResponse.value?.success
+          ? facesResponse.value.data || []
+          : [];
+
+      if (facesResponse.status === 'rejected') {
+        console.warn(
+          'FaceGalleryScreen: getFaceGallery rejected',
+          facesResponse.reason?.message || facesResponse.reason
+        );
+      } else if (facesResponse.value && !facesResponse.value.success) {
+        console.warn('FaceGalleryScreen: getFaceGallery returned success=false');
+      }
+
+      const wardOrder = [];
+      const wardsMap = new Map();
+      const employeesMap = new Map();
+      const employeeHasImage = new Set();
+
+      const ensureWardEntry = (wardKey, wardName) => {
+        if (!wardKey) {
+          wardKey = `ward-${wardOrder.length + 1}`;
+        }
+        const normalizedKey = String(wardKey);
+
+        if (!wardsMap.has(normalizedKey)) {
+          wardsMap.set(normalizedKey, {
+            wardId: normalizedKey,
+            wardName: wardName || 'Ward',
+            employees: [],
+          });
+          wardOrder.push(normalizedKey);
+        }
+
+        return wardsMap.get(normalizedKey);
+      };
+
+      employeesPayload.forEach((ward, wardIndex) => {
+        const wardKeyCandidate =
+          ward?.ward_id ??
+          ward?.id ??
+          ward?.wardId ??
+          ward?.ward_code ??
+          ward?.code ??
+          `ward-${wardIndex + 1}`;
+
+        const wardKey = String(wardKeyCandidate);
+        const wardName = ward?.ward_name || ward?.name || `Ward ${wardIndex + 1}`;
+
+        ensureWardEntry(wardKey, wardName);
+
+        (ward.employees || []).forEach((employee) => {
+          const idCandidates = [
+            employee?.emp_id,
+            employee?.empId,
+            employee?.employee_id,
+            employee?.employeeId,
+            employee?.id,
+            employee?.emp_code,
+            employee?.employee_code,
+          ];
+
+          const resolvedId = idCandidates.find((value) => {
+            if (value === null || value === undefined) {
+              return false;
             }
+            const stringValue = String(value).trim();
+            return stringValue.length > 0;
+          });
 
-            return {
-              id: employee?.emp_id ?? employee?.empId ?? employee?.id ?? employee?.emp_code ?? String(Math.random()),
-              name: employee?.emp_name || 'Employee',
-              designation: employee?.designation || 'Staff',
-              code: employee?.emp_code || employee?.employee_code || 'NA',
-              wardName: ward?.ward_name || 'Ward',
-              imageUrl,
-            };
-          })
-          .filter(Boolean);
+          if (resolvedId === undefined) {
+            return;
+          }
 
-        return {
-          wardId: ward?.ward_id ?? ward?.id ?? Math.random().toString(36).slice(2),
-          wardName: ward?.ward_name || 'Ward',
-          employees: employeesWithImages,
-        };
-      }).filter(ward => ward.employees.length > 0);
+          const employeeKey = String(resolvedId).trim();
+          if (!employeesMap.has(employeeKey)) {
+            employeesMap.set(employeeKey, {
+              employee,
+              wardKey,
+              wardName,
+            });
+          }
+        });
+      });
 
-      setGallery(wards);
+      faceImages.forEach((image, index) => {
+        if (!image?.url) {
+          return;
+        }
+
+        const employeeKey =
+          image?.employeeId !== null && image?.employeeId !== undefined
+            ? String(image.employeeId)
+            : image?.identifier
+              ? String(image.identifier).trim()
+              : null;
+
+        if (employeeKey && employeesMap.has(employeeKey)) {
+          const { employee, wardKey, wardName } = employeesMap.get(employeeKey);
+          const wardEntry = ensureWardEntry(wardKey, wardName);
+
+          wardEntry.employees.push({
+            id: `${employeeKey}-${index}`,
+            name: employee?.emp_name || employee?.name || 'Employee',
+            designation: employee?.designation || employee?.role || 'Staff',
+            code:
+              employee?.emp_code ||
+              employee?.employee_code ||
+              employeeKey,
+            wardName,
+            imageUrl: image.url,
+            capturedAt: image?.lastModified || null,
+            source: 's3',
+          });
+
+          employeeHasImage.add(employeeKey);
+          image.__matched = true;
+        }
+      });
+
+      employeesMap.forEach(({ employee, wardKey, wardName }, employeeKey) => {
+        if (employeeHasImage.has(employeeKey)) {
+          return;
+        }
+
+        const fallbackUrl = extractFaceImage(employee);
+        if (!fallbackUrl) {
+          return;
+        }
+
+        const wardEntry = ensureWardEntry(wardKey, wardName);
+        wardEntry.employees.push({
+          id: `${employeeKey}-fallback`,
+          name: employee?.emp_name || employee?.name || 'Employee',
+          designation: employee?.designation || employee?.role || 'Staff',
+          code:
+            employee?.emp_code ||
+            employee?.employee_code ||
+            employeeKey,
+          wardName,
+          imageUrl: fallbackUrl,
+          capturedAt: null,
+          source: 'employee',
+        });
+      });
+
+      const unassignedImages = faceImages.filter(
+        (image) => !image?.__matched && image?.url
+      );
+
+      if (unassignedImages.length > 0) {
+        const unassignedWard = ensureWardEntry('unassigned', 'Unassigned Faces');
+        unassignedImages.forEach((image, index) => {
+          const identifier =
+            image?.identifier && String(image.identifier).trim().length
+              ? String(image.identifier).trim()
+              : null;
+
+          unassignedWard.employees.push({
+            id: `unassigned-${index}`,
+            name: identifier ? `Identifier ${identifier}` : 'Unknown Face',
+            designation: identifier
+              ? 'Not linked to an employee'
+              : 'Unknown source',
+            code: identifier || 'N/A',
+            wardName: 'Unassigned Faces',
+            imageUrl: image.url,
+            capturedAt: image?.lastModified || null,
+            source: 's3-unassigned',
+          });
+        });
+      }
+
+      const assembledGallery = wardOrder
+        .map((wardKey) => wardsMap.get(wardKey))
+        .filter((ward) => ward && ward.employees.length > 0);
+
+      setGallery(assembledGallery);
     } catch (error) {
       console.error('FaceGalleryScreen: fetchGallery failed', error);
       setGallery([]);
