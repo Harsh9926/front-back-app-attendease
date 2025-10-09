@@ -13,6 +13,7 @@ const {
   PutObjectCommand,
   GetObjectCommand,
   HeadObjectCommand,
+  ListObjectsV2Command,
 } = require("@aws-sdk/client-s3");
 
 // Initialize AWS clients
@@ -45,4 +46,5 @@ module.exports = {
   PutObjectCommand,
   GetObjectCommand,
   HeadObjectCommand,
+  ListObjectsV2Command,
 };

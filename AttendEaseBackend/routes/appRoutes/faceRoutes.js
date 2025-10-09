@@ -8,6 +8,7 @@ const {
   DeleteFacesCommand,
   DeleteObjectCommand,
   HeadObjectCommand,
+  ListObjectsV2Command,
 } = require("../../config/awsConfig");
 const pool = require("../../config/db");
 const upload = require("../../middleware/upload");
@@ -15,6 +16,15 @@ const { buildPublicFaceUrl } = require("../../utils/faceImage");
 
 const bucketName =
   process.env.AWS_S3_BUCKET || process.env.S3_BUCKET_NAME || null;
+const DEFAULT_FACE_PREFIX = "faces/";
+
+const resolvePrefix = (rawPrefix) => {
+  const candidate = typeof rawPrefix === "string" ? rawPrefix.trim() : "";
+  if (candidate.length === 0) {
+    return DEFAULT_FACE_PREFIX;
+  }
+  return candidate.endsWith("/") ? candidate : `${candidate}/`;
+};
 
 const normalizeId = (value) => {
   if (value === undefined || value === null) {
@@ -61,6 +71,107 @@ const ensureCollectionExists = async (collectionId) => {
 
   collectionReady = true;
 };
+
+const extractIdentifierFromKey = (key, prefix) => {
+  if (!key || typeof key !== "string") {
+    return null;
+  }
+
+  const normalizedPrefix = prefix || "";
+  const stripped = normalizedPrefix && key.startsWith(normalizedPrefix)
+    ? key.slice(normalizedPrefix.length)
+    : key;
+
+  const [identifier] = stripped.split("/");
+  return identifier || null;
+};
+
+const parseEmployeeId = (identifier) => {
+  if (!identifier) {
+    return null;
+  }
+
+  const numericCandidate = Number(identifier);
+  if (Number.isFinite(numericCandidate)) {
+    return numericCandidate;
+  }
+
+  const digitsOnly = identifier.replace(/\D+/g, "");
+  if (!digitsOnly) {
+    return null;
+  }
+
+  const parsed = Number(digitsOnly);
+  return Number.isFinite(parsed) ? parsed : null;
+};
+
+router.get("/gallery", async (req, res) => {
+  if (!bucketName) {
+    return res.status(500).json({
+      error: "S3 bucket is not configured",
+      details: "Set AWS_S3_BUCKET or S3_BUCKET_NAME in the backend environment.",
+    });
+  }
+
+  const prefix = resolvePrefix(req.query.prefix || DEFAULT_FACE_PREFIX);
+  const maxKeys = Math.min(
+    Math.max(Number(req.query.maxKeys) || 200, 1),
+    1000
+  );
+
+  const images = [];
+  let continuationToken = undefined;
+
+  try {
+    do {
+      const command = new ListObjectsV2Command({
+        Bucket: bucketName,
+        Prefix: prefix,
+        ContinuationToken: continuationToken,
+        MaxKeys: maxKeys,
+      });
+
+      const response = await s3.send(command);
+      const contents = response?.Contents || [];
+
+      contents.forEach((item) => {
+        if (!item?.Key || item.Key.endsWith("/")) {
+          return;
+        }
+
+        const identifier = extractIdentifierFromKey(item.Key, prefix);
+        const employeeId = parseEmployeeId(identifier);
+
+        images.push({
+          key: item.Key,
+          identifier,
+          employeeId,
+          size: item.Size ?? null,
+          lastModified: item.LastModified ?? null,
+          url: buildPublicFaceUrl(item.Key),
+        });
+      });
+
+      continuationToken = response.IsTruncated
+        ? response.NextContinuationToken
+        : undefined;
+    } while (continuationToken);
+
+    res.json({
+      success: true,
+      bucket: bucketName,
+      prefix,
+      count: images.length,
+      images,
+    });
+  } catch (error) {
+    console.error("Face gallery fetch error:", error);
+    res.status(500).json({
+      error: "Unable to list face images",
+      details: error.message,
+    });
+  }
+});
 
 router.post("/store-face", upload.single("image"), async (req, res) => {
   try {
