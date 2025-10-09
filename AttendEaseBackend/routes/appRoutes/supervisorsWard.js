@@ -2,6 +2,7 @@ const express = require("express");
 const router = express.Router();
 const pool = require("../../config/db");
 const authenticate = require("../../middleware/authenticate");
+const { buildPublicFaceUrl } = require("../../utils/faceImage");
 
 const resolveDateRange = (rawStart, rawEnd) => {
   const today = new Date();
@@ -52,6 +53,13 @@ const mapRowsToWards = (rows) => {
       };
     }
 
+    const faceImageUrl = buildPublicFaceUrl(row.face_embedding);
+    const faceEnrolled = Boolean(row.face_embedding);
+    const faceConfidence =
+      row.face_confidence !== undefined && row.face_confidence !== null
+        ? Number(row.face_confidence)
+        : null;
+
     wardMap[wardId].employees.push({
       emp_id: row.emp_id,
       emp_name: row.employee_name,
@@ -62,10 +70,72 @@ const mapRowsToWards = (rows) => {
       attendance_status: row.attendance_status,
       days_present: Number(row.days_present ?? 0),
       days_marked: Number(row.days_marked ?? 0),
+      face_embedding: row.face_embedding,
+      face_id: row.face_id,
+      faceId: row.face_id,
+      face_confidence: faceConfidence,
+      faceConfidence: faceConfidence,
+      face_image_url: faceImageUrl,
+      faceImageUrl: faceImageUrl,
+      faceEnrollmentUrl: faceImageUrl,
+      face_enrolled: faceEnrolled,
+      faceEnrolled: faceEnrolled,
+      face_registered: faceEnrolled,
+      faceRegistered: faceEnrolled,
     });
   });
 
   return Object.values(wardMap);
+};
+
+const fetchSupervisorSummary = async (userId, startDate, endDate) => {
+  const summaryQuery = `
+    WITH assigned_employees AS (
+      SELECT e.emp_id
+      FROM employee e
+      JOIN supervisor_ward sw ON e.ward_id = sw.ward_id
+      WHERE sw.supervisor_id = $1
+    ),
+    attendance_window AS (
+      SELECT
+        a.emp_id,
+        MAX(CASE WHEN a.punch_in_time IS NOT NULL THEN 1 ELSE 0 END) AS has_punch_in,
+        MAX(CASE WHEN a.punch_out_time IS NOT NULL THEN 1 ELSE 0 END) AS has_punch_out
+      FROM attendance a
+      JOIN assigned_employees ae ON ae.emp_id = a.emp_id
+      WHERE a.date BETWEEN $2 AND $3
+      GROUP BY a.emp_id
+    )
+    SELECT
+      (SELECT COUNT(*) FROM assigned_employees) AS total_employees,
+      COALESCE((SELECT COUNT(*) FROM attendance_window WHERE has_punch_in = 1 AND has_punch_out = 0), 0) AS in_progress,
+      COALESCE((SELECT COUNT(*) FROM attendance_window WHERE has_punch_out = 1), 0) AS marked,
+      GREATEST(
+        (SELECT COUNT(*) FROM assigned_employees) -
+        COALESCE((SELECT COUNT(*) FROM attendance_window WHERE has_punch_in = 1), 0),
+        0
+      ) AS not_marked
+  `;
+
+  const result = await pool.query(summaryQuery, [userId, startDate, endDate]);
+  const summary = result.rows[0] || {};
+
+  const totalEmployees = Number(summary.total_employees) || 0;
+  const inProgress = Number(summary.in_progress) || 0;
+  const marked = Number(summary.marked) || 0;
+  const notMarked = Number(summary.not_marked) || 0;
+  const attendanceRate =
+    totalEmployees > 0
+      ? Number((((inProgress + marked) / totalEmployees) * 100).toFixed(1))
+      : 0;
+
+  return {
+    totalEmployees,
+    inProgress,
+    marked,
+    notMarked,
+    attendanceRate,
+  };
 };
 
 const fetchSupervisorEmployees = async (userId, startDate, endDate) => {
@@ -83,6 +153,9 @@ const fetchSupervisorEmployees = async (userId, startDate, endDate) => {
       c.city_name,
       d.designation_name,
       dept.department_name,
+      e.face_embedding,
+      e.face_confidence,
+      e.face_id,
       CASE
           WHEN summary.days_present IS NULL OR summary.days_present = 0 THEN 'Not Marked'
           WHEN summary.days_present > summary.days_marked THEN 'Present'
@@ -115,6 +188,26 @@ const fetchSupervisorEmployees = async (userId, startDate, endDate) => {
   return mapRowsToWards(result.rows);
 };
 
+// Summary endpoint for mobile (GET with authentication)
+router.get("/summary", authenticate, async (req, res) => {
+  const user_id = req.user.user_id;
+
+  if (!user_id) {
+    return res.status(400).json({ error: "User ID is required" });
+  }
+
+  try {
+    const { startDate: startDateRaw, endDate: endDateRaw } = req.query;
+    const { startDate, endDate } = resolveDateRange(startDateRaw, endDateRaw);
+    const summary = await fetchSupervisorSummary(user_id, startDate, endDate);
+
+    res.json({ success: true, data: summary });
+  } catch (error) {
+    console.error("Error fetching supervisor summary: ", error);
+    res.status(500).json({ success: false, error: "Internal Server Error" });
+  }
+});
+
 // GET endpoint for mobile app (uses JWT token)
 router.get("/", authenticate, async (req, res) => {
   const user_id = req.user.user_id;
@@ -131,6 +224,25 @@ router.get("/", authenticate, async (req, res) => {
     res.json({ success: true, data: response });
   } catch (error) {
     console.error("Error fetching employee data: ", error);
+    res.status(500).json({ success: false, error: "Internal Server Error" });
+  }
+});
+
+// Summary endpoint for web compatibility (POST with explicit user_id)
+router.post("/summary", async (req, res) => {
+  const { user_id, startDate: startDateRaw, endDate: endDateRaw } = req.body;
+
+  if (!user_id) {
+    return res.status(400).json({ error: "User ID is required" });
+  }
+
+  try {
+    const { startDate, endDate } = resolveDateRange(startDateRaw, endDateRaw);
+    const summary = await fetchSupervisorSummary(user_id, startDate, endDate);
+
+    res.json({ success: true, data: summary });
+  } catch (error) {
+    console.error("Error fetching supervisor summary: ", error);
     res.status(500).json({ success: false, error: "Internal Server Error" });
   }
 });

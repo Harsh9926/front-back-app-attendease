@@ -11,27 +11,10 @@ const {
 } = require("../../config/awsConfig");
 const pool = require("../../config/db");
 const upload = require("../../middleware/upload");
+const { buildPublicFaceUrl } = require("../../utils/faceImage");
 
-const bucketName = process.env.AWS_S3_BUCKET || process.env.AWS_S3_BUCKET;
-const awsRegion = process.env.AWS_REGION;
-
-const buildPublicFaceUrl = (key) => {
-  if (!bucketName || !key) {
-    return null;
-  }
-
-  if (key.startsWith("http")) {
-    return key;
-  }
-
-  const normalizedKey = key.replace(/^\/+/, "");
-
-  if (awsRegion) {
-    return `https://${bucketName}.s3.${awsRegion}.amazonaws.com/${normalizedKey}`;
-  }
-
-  return `https://${bucketName}.s3.amazonaws.com/${normalizedKey}`;
-};
+const bucketName =
+  process.env.AWS_S3_BUCKET || process.env.S3_BUCKET_NAME || null;
 
 const normalizeId = (value) => {
   if (value === undefined || value === null) {
