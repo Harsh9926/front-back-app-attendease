@@ -79,6 +79,7 @@ const DashboardScreen = () => {
   const [showEndPicker, setShowEndPicker] = useState(false);
   const isTablet = width >= 600 && width < 900;
   const isDesktop = width >= 900;
+  const [showHamburgerMenu, setShowHamburgerMenu] = useState(false);
   const resolveAttendanceId = useCallback(async (ward, employee, dateOverride) => {
     const directId =
       employee?.attendance_id ??
@@ -1318,10 +1319,19 @@ Please delete the existing face from the Face Enrollment Center before capturing
   }, [openFaceEnrollmentCapture, viewFaceDetails, promptFaceDeletion]);
 
   return (
-    <ScrollView style={styles.container} showsVerticalScrollIndicator={false}>
+    <>
+      <ScrollView style={styles.container} showsVerticalScrollIndicator={false}>
       {/* Compact Header */}
       <View style={styles.header}>
         <View style={styles.headerContent}>
+          <TouchableOpacity
+            style={styles.menuButton}
+            onPress={() => setShowHamburgerMenu(true)}
+            accessibilityRole="button"
+            accessibilityLabel="Open menu"
+          >
+            <Ionicons name="menu" size={22} color="#fff" />
+          </TouchableOpacity>
           <View style={styles.headerText}>
             <Text style={styles.greeting}>Hello, {user?.name || 'Supervisor'}!</Text>
             <Text style={styles.subGreeting}>Here's your team snapshot for today</Text>
@@ -1380,46 +1390,61 @@ Please delete the existing face from the Face Enrollment Center before capturing
               </View>
             </View>
 
-            {/* Compact Statistics Cards */}
-            <View style={styles.statsGrid}>
-              {statRows.map((row, rowIndex) => (
-                <View
-                  key={`stats-row-${rowIndex}`}
-                  style={[styles.statsRow, rowIndex === statRows.length - 1 && styles.statsRowLast]}
-                >
-                  {row.map((card) => (
-                    <View key={card.id} style={styles.statCard}>
-                      <View style={[styles.statIconWrapper, { backgroundColor: card.iconBackground }]}>
-                        <Ionicons name={card.icon} size={18} color={card.iconColor} />
-                      </View>
-                      <Text style={styles.statValue}>{card.value}</Text>
-                      <Text style={styles.statLabel}>{card.label}</Text>
-                      <Text style={styles.statHelper}>{card.helper}</Text>
-                    </View>
-                  ))}
-                </View>
-              ))}
-            </View>
-
-            {/* Compact Summary Card */}
-            <View style={styles.summaryCard}>
-              <View style={styles.summaryHeader}>
-                <View style={styles.summaryIconWrapper}>
-                  <Ionicons name="bulb-outline" size={18} color="#ffb347" />
-                </View>
-                <Text style={styles.summaryTitle}>Daily Highlights</Text>
+            <View style={styles.sectionContainer}>
+              <View style={styles.sectionHeaderRow}>
+                <Text style={styles.sectionLabel}>Overview</Text>
+                <Text style={styles.sectionMeta}>{formattedRangeLabel}</Text>
               </View>
-              <Text style={styles.summaryText}>{summaryMessage}</Text>
+              <View style={styles.sectionDescription}>
+                <Text style={styles.sectionDescriptionText}>
+                  Key metrics summarising workforce size, live attendance, and completion status for the selected range.
+                </Text>
+              </View>
+
+              <View style={styles.statsGrid}>
+                {statRows.map((row, rowIndex) => (
+                  <View
+                    key={`stats-row-${rowIndex}`}
+                    style={[styles.statsRow, rowIndex === statRows.length - 1 && styles.statsRowLast]}
+                  >
+                    {row.map((card) => (
+                      <View key={card.id} style={styles.statCard}>
+                        <View style={[styles.statIconWrapper, { backgroundColor: card.iconBackground }]}>
+                          <Ionicons name={card.icon} size={18} color={card.iconColor} />
+                        </View>
+                        <Text style={styles.statValue}>{card.value}</Text>
+                        <Text style={styles.statLabel}>{card.label}</Text>
+                        <Text style={styles.statHelper}>{card.helper}</Text>
+                      </View>
+                    ))}
+                  </View>
+                ))}
+              </View>
+
+              <View style={styles.summaryCard}>
+                <View style={styles.summaryHeader}>
+                  <View style={styles.summaryIconWrapper}>
+                    <Ionicons name="bulb-outline" size={18} color="#ffb347" />
+                  </View>
+                  <Text style={styles.summaryTitle}>Daily Highlights</Text>
+                </View>
+                <Text style={styles.summaryText}>{summaryMessage}</Text>
+              </View>
             </View>
 
             {/* Attendance Marking */}
-            <View style={styles.attendanceSection}>
-              <View style={styles.attendanceHeaderRow}>
-                <Text style={styles.sectionTitle}>Attendance Marking</Text>
+            <View style={[styles.sectionContainer, styles.sectionSpacingLarge]}>
+              <View style={styles.sectionHeaderRow}>
+                <Text style={styles.sectionLabel}>Attendance Marking</Text>
                 <TouchableOpacity style={styles.refreshButton} onPress={fetchDashboardStats}>
                   <Ionicons name="refresh" size={16} color="#007bff" />
                   <Text style={styles.refreshButtonText}>Refresh</Text>
                 </TouchableOpacity>
+              </View>
+              <View style={styles.sectionDescription}>
+                <Text style={styles.sectionDescriptionText}>
+                  Expand a ward to review employees, see punch history, and manage attendance directly.
+                </Text>
               </View>
 
               {wardEmployees.length === 0 ? (
@@ -1543,8 +1568,15 @@ Please delete the existing face from the Face Enrollment Center before capturing
             </View>
 
             {/* Compact Quick Actions Grid */}
-            <View style={styles.quickActionsSection}>
-              <Text style={styles.sectionTitle}>Quick Actions</Text>
+            <View style={[styles.sectionContainer, styles.sectionSpacingLarge]}>
+              <View style={styles.sectionHeaderRow}>
+                <Text style={styles.sectionLabel}>Quick Actions</Text>
+              </View>
+              <View style={styles.sectionDescription}>
+                <Text style={styles.sectionDescriptionText}>
+                  Access popular tools and shortcuts without leaving the dashboard.
+                </Text>
+              </View>
               <View style={styles.actionGrid}>
                 {quickActions.map((action) => (
                   <TouchableOpacity
@@ -1802,7 +1834,58 @@ Please delete the existing face from the Face Enrollment Center before capturing
           </View>
         </View>
       </Modal>
-    </ScrollView>
+      </ScrollView>
+
+      <Modal
+        visible={showHamburgerMenu}
+        animationType="slide"
+        transparent
+        onRequestClose={() => setShowHamburgerMenu(false)}
+      >
+        <View style={styles.menuOverlay}>
+          <View style={[styles.menuPanel, { width: Math.min(320, width * 0.8) }]}>
+            <View style={styles.menuHeader}>
+              <Text style={styles.menuTitle}>Menu</Text>
+              <TouchableOpacity
+                onPress={() => setShowHamburgerMenu(false)}
+                accessibilityRole="button"
+                accessibilityLabel="Close menu"
+                style={styles.menuCloseButton}
+              >
+                <Ionicons name="close" size={22} color="#1f2933" />
+              </TouchableOpacity>
+            </View>
+            <View style={styles.menuList}>
+              {quickActions.map((action) => (
+                <TouchableOpacity
+                  key={action.id}
+                  style={styles.menuItem}
+                  activeOpacity={0.8}
+                  onPress={() => {
+                    setShowHamburgerMenu(false);
+                    action.onPress?.();
+                  }}
+                >
+                  <View style={styles.menuItemIcon}>
+                    <Ionicons name={action.icon} size={18} color="#007bff" />
+                  </View>
+                  <View style={styles.menuItemText}>
+                    <Text style={styles.menuItemTitle}>{action.label}</Text>
+                    <Text style={styles.menuItemSubtitle}>{action.description}</Text>
+                  </View>
+                  <Ionicons name="chevron-forward" size={16} color="#c1c7d0" />
+                </TouchableOpacity>
+              ))}
+            </View>
+          </View>
+          <TouchableOpacity
+            style={styles.menuBackdrop}
+            activeOpacity={1}
+            onPress={() => setShowHamburgerMenu(false)}
+          />
+        </View>
+      </Modal>
+    </>
   );
 };
 
@@ -1833,11 +1916,21 @@ const styles = StyleSheet.create({
     width: '100%',
     paddingHorizontal: 16,
   },
+  menuButton: {
+    width: 42,
+    height: 42,
+    borderRadius: 21,
+    backgroundColor: 'rgba(255, 255, 255, 0.2)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 12,
+  },
   headerText: {
-    flex: 2,
+    flex: 1,
     flexDirection: 'column',
     justifyContent: 'center',
     alignItems: 'flex-start',
+    marginRight: 12,
   },
   headerBadge: {
     backgroundColor: 'rgba(255, 255, 255, 0.2)',
@@ -2277,11 +2370,116 @@ const styles = StyleSheet.create({
     color: '#4f5d75',
     lineHeight: 18,
   },
-  quickActionsSection: {
-    marginBottom: 16,
+  sectionContainer: {
+    backgroundColor: '#ffffff',
+    borderRadius: 16,
+    padding: 18,
+    borderWidth: 1,
+    borderColor: '#e3e7ef',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05,
+    shadowRadius: 4,
+    elevation: 2,
+    marginTop: 16,
   },
-  attendanceSection: {
-    marginBottom: 20,
+  sectionSpacingLarge: {
+    marginTop: 22,
+  },
+  sectionHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  sectionLabel: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#1f2933',
+  },
+  sectionMeta: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#6b778d',
+  },
+  sectionDescription: {
+    marginTop: 8,
+    marginBottom: 12,
+  },
+  sectionDescriptionText: {
+    fontSize: 12,
+    color: '#7b869c',
+    lineHeight: 18,
+  },
+  menuOverlay: {
+    flex: 1,
+    flexDirection: 'row',
+    backgroundColor: 'transparent',
+    justifyContent: 'flex-start',
+    alignItems: 'stretch',
+  },
+  menuBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(15, 23, 42, 0.35)',
+  },
+  menuPanel: {
+    backgroundColor: '#ffffff',
+    paddingTop: 24,
+    paddingHorizontal: 20,
+    paddingBottom: 28,
+    shadowColor: '#000',
+    shadowOffset: { width: -3, height: 0 },
+    shadowOpacity: 0.2,
+    shadowRadius: 12,
+    elevation: 12,
+  },
+  menuHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  menuTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#1f2933',
+  },
+  menuCloseButton: {
+    padding: 6,
+  },
+  menuList: {
+    marginTop: 16,
+  },
+  menuItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#f7f9ff',
+    borderRadius: 12,
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: '#e2e8ff',
+  },
+  menuItemIcon: {
+    width: 34,
+    height: 34,
+    borderRadius: 10,
+    backgroundColor: 'rgba(0, 123, 255, 0.12)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 12,
+  },
+  menuItemText: {
+    flex: 1,
+  },
+  menuItemTitle: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#1f2933',
+    marginBottom: 2,
+  },
+  menuItemSubtitle: {
+    fontSize: 12,
+    color: '#6b778d',
   },
   attendanceHeaderRow: {
     flexDirection: 'row',

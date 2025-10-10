@@ -2,9 +2,13 @@ import AWS from 'aws-sdk';
 import { AWS_CONFIG } from './aws';
 
 AWS.config.update({
-  accessKeyId: AWS_CONFIG.ACCESS_KEY_ID,
-  secretAccessKey: AWS_CONFIG.SECRET_ACCESS_KEY,
-  region: AWS_CONFIG.REGION,
+  ...(AWS_CONFIG.ACCESS_KEY_ID && AWS_CONFIG.SECRET_ACCESS_KEY
+    ? {
+        accessKeyId: AWS_CONFIG.ACCESS_KEY_ID,
+        secretAccessKey: AWS_CONFIG.SECRET_ACCESS_KEY,
+      }
+    : {}),
+  ...(AWS_CONFIG.REGION ? { region: AWS_CONFIG.REGION } : {}),
 });
 
 const rekognition = new AWS.Rekognition();
