@@ -5,36 +5,41 @@ const authenticate = require("../../middleware/authenticate");
 const { buildPublicFaceUrl } = require("../../utils/faceImage");
 
 const resolveDateRange = (rawStart, rawEnd) => {
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
+  const todayIso = new Date().toISOString().split("T")[0];
+  const ISO_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 
-  const parseDate = (value, fallback) => {
+  const normalizeInputDate = (value, fallbackIso) => {
     if (!value) {
-      return new Date(fallback.getTime());
+      return fallbackIso;
     }
 
-    const parsed = new Date(value);
-    if (Number.isNaN(parsed.getTime())) {
-      return new Date(fallback.getTime());
+    if (typeof value === "string") {
+      const trimmed = value.trim();
+      if (ISO_DATE_PATTERN.test(trimmed)) {
+        return trimmed;
+      }
+
+      const parsed = new Date(trimmed);
+      if (!Number.isNaN(parsed.getTime())) {
+        return parsed.toISOString().split("T")[0];
+      }
     }
 
-    parsed.setHours(0, 0, 0, 0);
-    return parsed;
+    if (value instanceof Date && !Number.isNaN(value.getTime())) {
+      return value.toISOString().split("T")[0];
+    }
+
+    return fallbackIso;
   };
 
-  let startDate = parseDate(rawStart, today);
-  let endDate = parseDate(rawEnd, today);
+  const startIso = normalizeInputDate(rawStart, todayIso);
+  const endIso = normalizeInputDate(rawEnd, todayIso);
 
-  if (startDate > endDate) {
-    const swap = startDate;
-    startDate = endDate;
-    endDate = swap;
+  if (startIso <= endIso) {
+    return { startDate: startIso, endDate: endIso };
   }
 
-  return {
-    startDate: startDate.toISOString().split("T")[0],
-    endDate: endDate.toISOString().split("T")[0],
-  };
+  return { startDate: endIso, endDate: startIso };
 };
 
 const mapRowsToWards = (rows) => {
@@ -96,25 +101,27 @@ const fetchSupervisorSummary = async (userId, startDate, endDate) => {
       JOIN supervisor_ward sw ON e.ward_id = sw.ward_id
       WHERE sw.supervisor_id = $1
     ),
-    attendance_window AS (
+    attendance_status AS (
       SELECT
-        a.emp_id,
+        ae.emp_id,
         MAX(CASE WHEN a.punch_in_time IS NOT NULL THEN 1 ELSE 0 END) AS has_punch_in,
         MAX(CASE WHEN a.punch_out_time IS NOT NULL THEN 1 ELSE 0 END) AS has_punch_out
-      FROM attendance a
-      JOIN assigned_employees ae ON ae.emp_id = a.emp_id
-      WHERE a.date::date BETWEEN $2::date AND $3::date
-      GROUP BY a.emp_id
+      FROM assigned_employees ae
+      LEFT JOIN attendance a
+        ON a.emp_id = ae.emp_id
+       AND a.date::date BETWEEN $2::date AND $3::date
+      GROUP BY ae.emp_id
     )
     SELECT
       (SELECT COUNT(*) FROM assigned_employees) AS total_employees,
-      COALESCE((SELECT COUNT(*) FROM attendance_window WHERE has_punch_in = 1 AND has_punch_out = 0), 0) AS in_progress,
-      COALESCE((SELECT COUNT(*) FROM attendance_window WHERE has_punch_out = 1), 0) AS marked,
+      COALESCE(SUM(CASE WHEN has_punch_in = 1 AND has_punch_out = 0 THEN 1 ELSE 0 END), 0) AS in_progress,
+      COALESCE(SUM(CASE WHEN has_punch_in = 1 AND has_punch_out = 1 THEN 1 ELSE 0 END), 0) AS marked,
       GREATEST(
         (SELECT COUNT(*) FROM assigned_employees) -
-        COALESCE((SELECT COUNT(*) FROM attendance_window WHERE has_punch_in = 1), 0),
+        COALESCE(SUM(CASE WHEN has_punch_in = 1 THEN 1 ELSE 0 END), 0),
         0
       ) AS not_marked
+    FROM attendance_status
   `;
 
   const result = await pool.query(summaryQuery, [userId, startDate, endDate]);
@@ -157,9 +164,9 @@ const fetchSupervisorEmployees = async (userId, startDate, endDate) => {
       e.face_confidence,
       e.face_id,
       CASE
-          WHEN summary.days_present IS NULL OR summary.days_present = 0 THEN 'Not Marked'
-          WHEN summary.days_present > summary.days_marked THEN 'Present'
-          ELSE 'Marked'
+          WHEN COALESCE(summary.has_punch_in, 0) = 0 THEN 'Not Marked'
+          WHEN COALESCE(summary.has_punch_out, 0) = 1 THEN 'Marked'
+          ELSE 'In Progress'
       END AS attendance_status,
       COALESCE(summary.days_present, 0) AS days_present,
       COALESCE(summary.days_marked, 0) AS days_marked
@@ -173,12 +180,14 @@ const fetchSupervisorEmployees = async (userId, startDate, endDate) => {
     JOIN department dept ON d.department_id = dept.department_id
     LEFT JOIN (
       SELECT
-        emp_id,
-        COUNT(*) FILTER (WHERE punch_in_time IS NOT NULL) AS days_present,
-        COUNT(*) FILTER (WHERE punch_out_time IS NOT NULL) AS days_marked
-      FROM attendance
-      WHERE date::date BETWEEN $2::date AND $3::date
-      GROUP BY emp_id
+        a.emp_id,
+        MAX(CASE WHEN a.punch_in_time IS NOT NULL THEN 1 ELSE 0 END) AS has_punch_in,
+        MAX(CASE WHEN a.punch_out_time IS NOT NULL THEN 1 ELSE 0 END) AS has_punch_out,
+        COUNT(*) FILTER (WHERE a.punch_in_time IS NOT NULL) AS days_present,
+        COUNT(*) FILTER (WHERE a.punch_out_time IS NOT NULL) AS days_marked
+      FROM attendance a
+      WHERE a.date::date BETWEEN $2::date AND $3::date
+      GROUP BY a.emp_id
     ) summary ON summary.emp_id = e.emp_id
     WHERE u.user_id = $1
     ORDER BY w.ward_id, e.name;

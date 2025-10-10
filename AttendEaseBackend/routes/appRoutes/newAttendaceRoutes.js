@@ -118,9 +118,11 @@ const DEFAULT_FACE_MATCH_THRESHOLD = Number.isFinite(parsedFaceThreshold)
 
 // Utility functions
 function formatDate(date = new Date()) {
-  const istOffset = 5.5 * 60; // IST is UTC + 5.5 hours in minutes
-  const localDate = new Date(date.getTime() + istOffset * 60 * 1000);
-  return localDate.toISOString().split("T")[0];
+  const working = new Date(date.getTime());
+  const offsetMinutes = working.getTimezoneOffset();
+  return new Date(working.getTime() - offsetMinutes * 60 * 1000)
+    .toISOString()
+    .split("T")[0];
 }
 
 async function getOrCreateAttendanceRecord(emp_id, date) {
@@ -160,14 +162,14 @@ async function getOrCreateAttendanceRecord(emp_id, date) {
   // Create new record if not exists
   const insertResult = await pool.query(
     `INSERT INTO attendance (emp_id, date, ward_id) 
-     VALUES ($1, CURRENT_DATE, $2) 
+     VALUES ($1, $2::date, $3) 
      RETURNING attendance_id, date, ward_id`,
-    [emp_id, ward_id]
+    [emp_id, date, ward_id]
   );
 
   const attendance = {
     attendance_id: insertResult.rows[0].attendance_id,
-    date: date,
+    date,
     punch_in_time: null,
     punch_out_time: null,
     duration: null,
