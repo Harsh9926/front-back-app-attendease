@@ -87,6 +87,23 @@ const mapRowsToWards = (rows) => {
       faceEnrolled: faceEnrolled,
       face_registered: faceEnrolled,
       faceRegistered: faceEnrolled,
+      punch_in_time: row.punch_in_time,
+      punch_out_time: row.punch_out_time,
+      last_punch_time: row.last_punch_time,
+      punch_in_display: row.punch_in_display,
+      punch_out_display: row.punch_out_display,
+      last_punch_display: row.last_punch_display,
+      has_punch_in: Boolean(row.has_punch_in),
+      has_punch_out: Boolean(row.has_punch_out),
+      punch_in_epoch: row.punch_in_epoch
+        ? Number(row.punch_in_epoch)
+        : null,
+      punch_out_epoch: row.punch_out_epoch
+        ? Number(row.punch_out_epoch)
+        : null,
+      last_punch_epoch: row.last_punch_epoch
+        ? Number(row.last_punch_epoch)
+        : null,
     });
   });
 
@@ -169,7 +186,18 @@ const fetchSupervisorEmployees = async (userId, startDate, endDate) => {
           ELSE 'In Progress'
       END AS attendance_status,
       COALESCE(summary.days_present, 0) AS days_present,
-      COALESCE(summary.days_marked, 0) AS days_marked
+      COALESCE(summary.days_marked, 0) AS days_marked,
+      summary.has_punch_in,
+      summary.has_punch_out,
+      summary.last_punch_time,
+      summary.punch_in_time,
+      summary.punch_out_time,
+      summary.punch_in_display,
+      summary.punch_out_display,
+      summary.last_punch_display,
+      summary.punch_in_epoch,
+      summary.punch_out_epoch,
+      summary.last_punch_epoch
     FROM employee e
     JOIN wards w ON e.ward_id = w.ward_id
     JOIN zones z ON w.zone_id = z.zone_id
@@ -184,7 +212,36 @@ const fetchSupervisorEmployees = async (userId, startDate, endDate) => {
         MAX(CASE WHEN a.punch_in_time IS NOT NULL THEN 1 ELSE 0 END) AS has_punch_in,
         MAX(CASE WHEN a.punch_out_time IS NOT NULL THEN 1 ELSE 0 END) AS has_punch_out,
         COUNT(*) FILTER (WHERE a.punch_in_time IS NOT NULL) AS days_present,
-        COUNT(*) FILTER (WHERE a.punch_out_time IS NOT NULL) AS days_marked
+        COUNT(*) FILTER (WHERE a.punch_out_time IS NOT NULL) AS days_marked,
+        MAX(a.punch_in_time) FILTER (WHERE a.punch_in_time IS NOT NULL) AS punch_in_time,
+        MAX(a.punch_out_time) FILTER (WHERE a.punch_out_time IS NOT NULL) AS punch_out_time,
+        MAX(
+          CASE
+            WHEN a.punch_out_time IS NOT NULL THEN a.punch_out_time
+            WHEN a.punch_in_time IS NOT NULL THEN a.punch_in_time
+            ELSE NULL
+          END
+        ) AS last_punch_time,
+        TO_CHAR((MAX(a.punch_in_time) AT TIME ZONE 'Asia/Kolkata'), 'HH12:MI AM') AS punch_in_display,
+        TO_CHAR((MAX(a.punch_out_time) AT TIME ZONE 'Asia/Kolkata'), 'HH12:MI AM') AS punch_out_display,
+        TO_CHAR((
+          MAX(
+            CASE
+              WHEN a.punch_out_time IS NOT NULL THEN a.punch_out_time
+              WHEN a.punch_in_time IS NOT NULL THEN a.punch_in_time
+              ELSE NULL
+            END
+          ) AT TIME ZONE 'Asia/Kolkata'
+        ), 'HH12:MI AM') AS last_punch_display,
+        EXTRACT(EPOCH FROM MAX(a.punch_in_time)) AS punch_in_epoch,
+        EXTRACT(EPOCH FROM MAX(a.punch_out_time)) AS punch_out_epoch,
+        EXTRACT(EPOCH FROM MAX(
+          CASE
+            WHEN a.punch_out_time IS NOT NULL THEN a.punch_out_time
+            WHEN a.punch_in_time IS NOT NULL THEN a.punch_in_time
+            ELSE NULL
+          END
+        )) AS last_punch_epoch
       FROM attendance a
       WHERE a.date::date BETWEEN $2::date AND $3::date
       GROUP BY a.emp_id

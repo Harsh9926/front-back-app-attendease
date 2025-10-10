@@ -513,18 +513,132 @@ const DashboardScreen = () => {
     });
   };
 
-  const ensureCameraPermission = async () => {
-    if (cameraPermission === 'granted') {
-      return true;
-    }
-    const { status } = await CameraModule.requestCameraPermissionsAsync();
+const ensureCameraPermission = async () => {
+  if (cameraPermission === 'granted') {
+    return true;
+  }
+  const { status } = await CameraModule.requestCameraPermissionsAsync();
     setCameraPermission(status);
     if (status !== 'granted') {
       Alert.alert('Camera Access', 'Camera permission is required to capture attendance photos.');
       return false;
     }
-    return true;
-  };
+  return true;
+};
+
+  const parsePunchTime = useCallback((value) => {
+    if (!value) {
+      return null;
+    }
+
+    if (value instanceof Date) {
+      return Number.isNaN(value.getTime()) ? null : value;
+    }
+
+    if (typeof value === 'number') {
+      const ms = value >= 1e12 ? value : value * 1000;
+      const date = new Date(ms);
+      return Number.isNaN(date.getTime()) ? null : date;
+    }
+
+    if (typeof value === 'string') {
+      const trimmed = value.trim();
+      if (!trimmed) {
+        return null;
+      }
+
+      const date = new Date(trimmed);
+      return Number.isNaN(date.getTime()) ? null : date;
+    }
+
+    return null;
+  }, []);
+
+  const IST_OFFSET_MINUTES = 330;
+
+  const formatPunchDisplay = useCallback((date) => {
+    if (!date || Number.isNaN(date.getTime())) {
+      return null;
+    }
+
+    try {
+      if (typeof Intl !== 'undefined' && Intl.DateTimeFormat) {
+        const formatter = new Intl.DateTimeFormat('en-IN', {
+          hour: '2-digit',
+          minute: '2-digit',
+          hour12: true,
+          timeZone: 'Asia/Kolkata',
+        });
+        return formatter.format(date);
+      }
+    } catch (error) {
+      // fall back to manual conversion below
+    }
+
+    const istMillis = date.getTime() + IST_OFFSET_MINUTES * 60 * 1000;
+    const istDate = new Date(istMillis);
+    const hours24 = istDate.getUTCHours();
+    const minutes = istDate.getUTCMinutes();
+
+    const suffix = hours24 >= 12 ? 'PM' : 'AM';
+    const hours12 = ((hours24 + 11) % 12) + 1;
+    const paddedMinutes = minutes.toString().padStart(2, '0');
+    const paddedHours = hours12.toString().padStart(2, '0');
+
+    return `${paddedHours}:${paddedMinutes} ${suffix}`;
+  }, []);
+
+  const getEmployeePunchTimes = useCallback((employee) => {
+    if (!employee) {
+      return {
+        punchIn: null,
+        punchOut: null,
+        lastPunch: null,
+        punchInDisplay: null,
+        punchOutDisplay: null,
+      };
+    }
+
+    const punchIn =
+      parsePunchTime(employee.punch_in_epoch) ??
+      parsePunchTime(employee.punch_in_time);
+
+    const punchOut =
+      parsePunchTime(employee.punch_out_epoch) ??
+      parsePunchTime(employee.punch_out_time);
+
+    const lastPunch =
+      parsePunchTime(employee.last_punch_epoch) ??
+      parsePunchTime(employee.last_punch_time) ??
+      punchOut ??
+      punchIn ??
+      null;
+
+    const stringOrNull = (value) =>
+      typeof value === 'string' && value.trim().length > 0
+        ? value.trim()
+        : null;
+
+    const punchInDisplay =
+      stringOrNull(employee.punch_in_display) ??
+      formatPunchDisplay(
+        punchIn && Number.isNaN(punchIn.getTime()) ? null : punchIn
+      );
+
+    const punchOutDisplay =
+      stringOrNull(employee.punch_out_display) ??
+      formatPunchDisplay(
+        punchOut && Number.isNaN(punchOut.getTime()) ? null : punchOut
+      );
+
+    return {
+      punchIn,
+      punchOut,
+      lastPunch,
+      punchInDisplay,
+      punchOutDisplay,
+    };
+  }, [parsePunchTime, formatPunchDisplay]);
 
   const openPunchCapture = async (ward, employee, punchType) => {
     const hasPermission = await ensureCameraPermission();
@@ -1345,9 +1459,15 @@ Please delete the existing face from the Face Enrollment Center before capturing
                               const punchOutKey = `${ward.ward_id}-${employee.emp_id}-out`;
                               const isPunchingIn = punchingMap[punchInKey];
                               const isPunchingOut = punchingMap[punchOutKey];
+                              const hasPunchIn = !!employee.has_punch_in;
+                              const hasPunchOut = !!employee.has_punch_out;
 
                               const statusLabel = employee.attendance_status || 'Not Marked';
                               const statusTheme = getAttendanceStatusTheme(statusLabel);
+                              const {
+                                punchInDisplay,
+                                punchOutDisplay,
+                              } = getEmployeePunchTimes(employee);
 
                               return (
                                 <View key={employee.emp_id || employee.emp_code} style={styles.attendanceEmployeeRow}>
@@ -1372,26 +1492,38 @@ Please delete the existing face from the Face Enrollment Center before capturing
                                   <View style={styles.attendanceActionRow}>
                                     <View style={styles.punchButtonRow}>
                                       <TouchableOpacity
-                                        style={[styles.punchButton, styles.punchInButton, (isPunchingIn || isPunchingOut) && styles.punchButtonDisabled]}
+                                        style={[
+                                          styles.punchButton,
+                                          styles.punchInButton,
+                                          (isPunchingIn || isPunchingOut || hasPunchIn) && styles.punchButtonDisabled,
+                                        ]}
                                         onPress={() => openPunchCapture(ward, employee, 'in')}
-                                        disabled={isPunchingIn || isPunchingOut}
+                                        disabled={isPunchingIn || isPunchingOut || hasPunchIn}
                                         activeOpacity={0.8}
                                       >
                                         {isPunchingIn ? (
                                           <ActivityIndicator size="small" color="#fff" />
+                                        ) : punchInDisplay ? (
+                                          <Text style={styles.punchButtonText}>{`In • ${punchInDisplay}`}</Text>
                                         ) : (
                                           <Text style={styles.punchButtonText}>Punch In</Text>
                                         )}
                                       </TouchableOpacity>
 
                                       <TouchableOpacity
-                                        style={[styles.punchButton, styles.punchOutButton, (isPunchingIn || isPunchingOut) && styles.punchButtonDisabled]}
+                                        style={[
+                                          styles.punchButton,
+                                          styles.punchOutButton,
+                                          (isPunchingIn || isPunchingOut || !hasPunchIn || hasPunchOut) && styles.punchButtonDisabled,
+                                        ]}
                                         onPress={() => openPunchCapture(ward, employee, 'out')}
-                                        disabled={isPunchingIn || isPunchingOut}
+                                        disabled={isPunchingIn || isPunchingOut || !hasPunchIn || hasPunchOut}
                                         activeOpacity={0.8}
                                       >
                                         {isPunchingOut ? (
                                           <ActivityIndicator size="small" color="#fff" />
+                                        ) : punchOutDisplay ? (
+                                          <Text style={styles.punchButtonText}>{`Out • ${punchOutDisplay}`}</Text>
                                         ) : (
                                           <Text style={styles.punchButtonText}>Punch Out</Text>
                                         )}
