@@ -9,6 +9,7 @@ import {
   ActivityIndicator,
   RefreshControl,
   Modal,
+  Alert,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useAuth } from '../context/AuthContext';
@@ -60,6 +61,12 @@ const FaceGalleryScreen = ({ navigation }) => {
   const [gallery, setGallery] = useState([]);
   const [refreshing, setRefreshing] = useState(false);
   const [selected, setSelected] = useState(null);
+  const [deleting, setDeleting] = useState(false);
+
+  const parseNumericId = (value) => {
+    const numeric = Number(value);
+    return Number.isFinite(numeric) ? numeric : null;
+  };
 
   const fetchGallery = useCallback(async () => {
     setLoading(true);
@@ -163,11 +170,19 @@ const FaceGalleryScreen = ({ navigation }) => {
           }
 
           const employeeKey = String(resolvedId).trim();
+          const numericEmployeeId =
+            parseNumericId(employee?.emp_id) ??
+            parseNumericId(employee?.empId) ??
+            parseNumericId(employee?.employee_id) ??
+            parseNumericId(employee?.employeeId) ??
+            parseNumericId(employee?.id);
+
           if (!employeesMap.has(employeeKey)) {
             employeesMap.set(employeeKey, {
               employee,
               wardKey,
               wardName,
+              employeeId: numericEmployeeId,
             });
           }
         });
@@ -186,8 +201,15 @@ const FaceGalleryScreen = ({ navigation }) => {
               : null;
 
         if (employeeKey && employeesMap.has(employeeKey)) {
-          const { employee, wardKey, wardName } = employeesMap.get(employeeKey);
+          const {
+            employee,
+            wardKey,
+            wardName,
+            employeeId: mappedEmployeeId,
+          } = employeesMap.get(employeeKey);
           const wardEntry = ensureWardEntry(wardKey, wardName);
+          const galleryEmployeeId =
+            parseNumericId(image.employeeId) ?? mappedEmployeeId ?? null;
 
           wardEntry.employees.push({
             id: `${employeeKey}-${index}`,
@@ -201,6 +223,8 @@ const FaceGalleryScreen = ({ navigation }) => {
             imageUrl: image.url,
             capturedAt: image?.lastModified || null,
             source: 's3',
+            employeeId: galleryEmployeeId,
+            imageKey: image?.key || null,
           });
 
           employeeHasImage.add(employeeKey);
@@ -208,7 +232,7 @@ const FaceGalleryScreen = ({ navigation }) => {
         }
       });
 
-      employeesMap.forEach(({ employee, wardKey, wardName }, employeeKey) => {
+      employeesMap.forEach(({ employee, wardKey, wardName, employeeId }, employeeKey) => {
         if (employeeHasImage.has(employeeKey)) {
           return;
         }
@@ -231,6 +255,14 @@ const FaceGalleryScreen = ({ navigation }) => {
           imageUrl: fallbackUrl,
           capturedAt: null,
           source: 'employee',
+          employeeId:
+            parseNumericId(employee?.emp_id) ??
+            parseNumericId(employee?.empId) ??
+            parseNumericId(employee?.employee_id) ??
+            parseNumericId(employee?.employeeId) ??
+            employeeId ??
+            null,
+          imageKey: null,
         });
       });
 
@@ -257,6 +289,8 @@ const FaceGalleryScreen = ({ navigation }) => {
             imageUrl: image.url,
             capturedAt: image?.lastModified || null,
             source: 's3-unassigned',
+            employeeId: parseNumericId(image?.employeeId),
+            imageKey: image?.key || null,
           });
         });
       }
@@ -283,6 +317,56 @@ const FaceGalleryScreen = ({ navigation }) => {
     await fetchGallery();
     setRefreshing(false);
   };
+
+  const performDelete = useCallback(
+    async (employeeId) => {
+      if (!employeeId) {
+        return;
+      }
+
+      setDeleting(true);
+      try {
+        await apiService.deleteFaceEnrollment(employeeId);
+        setSelected(null);
+        await fetchGallery();
+        Alert.alert('Face Gallery', 'Face entry deleted successfully.');
+      } catch (error) {
+        console.error('FaceGalleryScreen: delete face failed', error);
+        const message =
+          error?.response?.data?.details ||
+          error?.response?.data?.error ||
+          error?.message ||
+          'Unable to delete the selected face right now.';
+        Alert.alert('Face Gallery', message);
+      } finally {
+        setDeleting(false);
+      }
+    },
+    [fetchGallery],
+  );
+
+  const confirmDelete = useCallback(
+    (employeeId) => {
+      if (!employeeId || deleting) {
+        return;
+      }
+
+      Alert.alert(
+        'Delete this face?',
+        'This will remove the stored face image and unlink it from attendance.',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          {
+            text: 'Delete',
+            style: 'destructive',
+            onPress: () => performDelete(employeeId),
+          },
+        ],
+        { cancelable: true },
+      );
+    },
+    [performDelete, deleting],
+  );
 
   const renderContent = () => {
     if (loading) {
@@ -384,6 +468,37 @@ const FaceGalleryScreen = ({ navigation }) => {
                 <Text style={styles.modalDetails}>{selected.designation}</Text>
                 <Text style={styles.modalDetails}>Employee ID: {selected.code}</Text>
                 <Text style={styles.modalDetails}>Ward: {selected.wardName}</Text>
+                {selected.capturedAt ? (
+                  <Text style={styles.modalDetails}>
+                    Captured: {new Date(selected.capturedAt).toLocaleString()}
+                  </Text>
+                ) : null}
+                <View style={styles.modalActions}>
+                  <TouchableOpacity
+                    style={styles.modalActionButton}
+                    onPress={() => setSelected(null)}
+                    disabled={deleting}
+                  >
+                    <Text style={styles.modalActionText}>Close</Text>
+                  </TouchableOpacity>
+                  {selected.employeeId ? (
+                    <TouchableOpacity
+                      style={[
+                        styles.modalActionButton,
+                        styles.modalActionDanger,
+                        deleting && styles.modalActionDisabled,
+                      ]}
+                      onPress={() => confirmDelete(selected.employeeId)}
+                      disabled={deleting}
+                    >
+                      {deleting ? (
+                        <ActivityIndicator size="small" color="#fff" />
+                      ) : (
+                        <Text style={styles.modalActionDangerText}>Delete Face</Text>
+                      )}
+                    </TouchableOpacity>
+                  ) : null}
+                </View>
               </>
             )}
           </View>
@@ -557,6 +672,38 @@ const styles = StyleSheet.create({
   modalDetails: {
     fontSize: 13,
     color: '#6b7280',
+  },
+  modalActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    width: '100%',
+    gap: 12,
+    marginTop: 16,
+  },
+  modalActionButton: {
+    flex: 1,
+    height: 44,
+    borderRadius: 10,
+    backgroundColor: '#e5e7eb',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  modalActionText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#1f2933',
+  },
+  modalActionDanger: {
+    backgroundColor: '#dc2626',
+  },
+  modalActionDangerText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#fff',
+  },
+  modalActionDisabled: {
+    opacity: 0.6,
   },
 });
 

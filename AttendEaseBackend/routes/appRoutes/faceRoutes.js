@@ -12,7 +12,7 @@ const {
 } = require("../../config/awsConfig");
 const pool = require("../../config/db");
 const upload = require("../../middleware/upload");
-const { buildPublicFaceUrl } = require("../../utils/faceImage");
+const { buildPublicFaceUrl, parseFaceKey } = require("../../utils/faceImage");
 
 const bucketName =
   process.env.AWS_S3_BUCKET || process.env.S3_BUCKET_NAME || null;
@@ -174,6 +174,7 @@ router.get("/gallery", async (req, res) => {
 });
 
 router.post("/store-face", upload.single("image"), async (req, res) => {
+  let objectKey = null;
   try {
     const { userId: rawUserId, emp_id: rawEmpId, employeeId: rawEmployeeId } = req.body;
 
@@ -188,6 +189,23 @@ router.post("/store-face", upload.single("image"), async (req, res) => {
 
     if (!req.file) {
       return res.status(400).json({ error: "No file uploaded" });
+    }
+
+    if (!bucketName) {
+      return res.status(500).json({
+        error: "S3 bucket is not configured",
+        details: "Set AWS_S3_BUCKET or S3_BUCKET_NAME in the backend environment.",
+      });
+    }
+
+    const rawObjectKey = req.file.key || req.file.location;
+    objectKey = parseFaceKey(rawObjectKey);
+
+    if (!objectKey) {
+      return res.status(500).json({
+        error: "Error processing face data",
+        details: "Unable to resolve S3 object key for uploaded face image.",
+      });
     }
 
     const candidateEmpIds = [normalizedEmpId, normalizedUserId].filter(
@@ -254,7 +272,7 @@ router.post("/store-face", upload.single("image"), async (req, res) => {
       Image: {
         S3Object: {
           Bucket: bucketName,
-          Name: req.file.key,
+          Name: objectKey,
         },
       },
       ExternalImageId: targetEmployeeId.toString(),
@@ -272,7 +290,7 @@ router.post("/store-face", upload.single("image"), async (req, res) => {
     ) {
       const deleteCommand = new DeleteObjectCommand({
         Bucket: bucketName,
-        Key: req.file.key,
+        Key: objectKey,
       });
       await s3.send(deleteCommand);
 
@@ -295,7 +313,7 @@ router.post("/store-face", upload.single("image"), async (req, res) => {
          face_id = $4
        WHERE emp_id = $1
        RETURNING emp_id`,
-      [targetEmployeeId, req.file.key, confidence, faceId]
+      [targetEmployeeId, objectKey, confidence, faceId]
     );
 
     if (updateResult.rowCount === 0) {
@@ -305,18 +323,21 @@ router.post("/store-face", upload.single("image"), async (req, res) => {
     res.json({
       success: true,
       faceId,
-      imageUrl: req.file.location || buildPublicFaceUrl(req.file.key),
+      imageUrl: req.file.location || buildPublicFaceUrl(objectKey),
       confidence,
       empId: updateResult.rows[0].emp_id,
     });
   } catch (error) {
     console.error("Face processing error:", error);
 
-    if (req.file?.key) {
+    const cleanupKey =
+      objectKey || parseFaceKey(req.file?.key || req.file?.location);
+
+    if (cleanupKey) {
       try {
         const deleteCommand = new DeleteObjectCommand({
           Bucket: bucketName,
-          Key: req.file.key,
+          Key: cleanupKey,
         });
         await s3.send(deleteCommand);
       } catch (cleanupError) {
@@ -356,15 +377,21 @@ router.get("/:employeeId", async (req, res) => {
       return res.status(404).json({ error: "Face image not stored for this employee" });
     }
 
+    const objectKey = parseFaceKey(record.face_embedding);
+
     let s3ObjectExists = true;
-    try {
-      await s3.send(
-        new HeadObjectCommand({
-          Bucket: bucketName,
-          Key: record.face_embedding,
-        })
-      );
-    } catch (headError) {
+    if (objectKey) {
+      try {
+        await s3.send(
+          new HeadObjectCommand({
+            Bucket: bucketName,
+            Key: objectKey,
+          })
+        );
+      } catch (headError) {
+        s3ObjectExists = false;
+      }
+    } else {
       s3ObjectExists = false;
     }
 
@@ -395,6 +422,13 @@ router.delete("/:employeeId", async (req, res) => {
       return res.status(400).json({ error: "Valid employee ID is required" });
     }
 
+    if (!bucketName) {
+      return res.status(500).json({
+        error: "S3 bucket is not configured",
+        details: "Set AWS_S3_BUCKET or S3_BUCKET_NAME in the backend environment.",
+      });
+    }
+
     const { rows } = await pool.query(
       `SELECT emp_id, face_embedding, face_id
          FROM employee
@@ -412,12 +446,14 @@ router.delete("/:employeeId", async (req, res) => {
       return res.status(404).json({ error: "No face stored for this employee" });
     }
 
-    if (record.face_embedding) {
+    const objectKey = parseFaceKey(record.face_embedding);
+
+    if (objectKey) {
       try {
         await s3.send(
           new DeleteObjectCommand({
             Bucket: bucketName,
-            Key: record.face_embedding,
+            Key: objectKey,
           })
         );
       } catch (s3Error) {

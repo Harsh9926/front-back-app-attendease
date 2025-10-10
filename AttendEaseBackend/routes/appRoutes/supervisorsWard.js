@@ -103,7 +103,7 @@ const fetchSupervisorSummary = async (userId, startDate, endDate) => {
         MAX(CASE WHEN a.punch_out_time IS NOT NULL THEN 1 ELSE 0 END) AS has_punch_out
       FROM attendance a
       JOIN assigned_employees ae ON ae.emp_id = a.emp_id
-      WHERE a.date BETWEEN $2 AND $3
+      WHERE a.date::date BETWEEN $2::date AND $3::date
       GROUP BY a.emp_id
     )
     SELECT
@@ -177,7 +177,7 @@ const fetchSupervisorEmployees = async (userId, startDate, endDate) => {
         COUNT(*) FILTER (WHERE punch_in_time IS NOT NULL) AS days_present,
         COUNT(*) FILTER (WHERE punch_out_time IS NOT NULL) AS days_marked
       FROM attendance
-      WHERE date BETWEEN $2 AND $3
+      WHERE date::date BETWEEN $2::date AND $3::date
       GROUP BY emp_id
     ) summary ON summary.emp_id = e.emp_id
     WHERE u.user_id = $1

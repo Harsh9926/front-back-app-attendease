@@ -26,7 +26,16 @@ const normalizeDate = (value) => {
   return date;
 };
 
-const toISODate = (value) => normalizeDate(value).toISOString().split('T')[0];
+const toISODate = (value) => {
+  const date = normalizeDate(value);
+  if (!Number.isFinite(date.getTime())) {
+    return '';
+  }
+
+  const offsetMinutes = date.getTimezoneOffset();
+  const adjusted = new Date(date.getTime() - offsetMinutes * 60 * 1000);
+  return adjusted.toISOString().split('T')[0];
+};
 
 const formatDateDisplay = (value) => {
   try {
@@ -335,24 +344,44 @@ const DashboardScreen = () => {
       let computedTotalEmployees = 0;
       let computedPresent = 0;
       let computedMarked = 0;
+      let computedAbsent = 0;
 
       wardsData.forEach((ward) => {
         const employees = ward.employees || [];
         computedTotalEmployees += employees.length;
         employees.forEach((emp) => {
           const status = (emp?.attendance_status || '').toString().trim().toLowerCase();
-          if (status === 'present') {
-            computedPresent += 1;
-          } else if (status.includes('marked')) {
-            computedMarked += 1;
+          switch (status) {
+            case 'present':
+            case 'in progress':
+            case 'in-progress':
+            case 'inprogress':
+              computedPresent += 1;
+              break;
+            case 'marked':
+              computedMarked += 1;
+              break;
+            case 'not marked':
+            case 'not-marked':
+            case 'notmarked':
+            case 'absent':
+              computedAbsent += 1;
+              break;
+            default:
+              if (status) {
+                console.warn('fetchDashboardStats: unhandled attendance status', status);
+              }
+              break;
           }
         });
       });
 
-      const computedAbsent = Math.max(
-        computedTotalEmployees - (computedPresent + computedMarked),
-        0
-      );
+      if (computedAbsent === 0) {
+        computedAbsent = Math.max(
+          computedTotalEmployees - (computedPresent + computedMarked),
+          0
+        );
+      }
 
       const summaryData =
         summaryResult?.success && summaryResult.data ? summaryResult.data : null;
@@ -369,7 +398,10 @@ const DashboardScreen = () => {
 
       const absentCount = resolveNumber(
         summaryData?.notMarked,
-        Math.max(totalEmployees - (presentToday + markedCount), computedAbsent)
+        Math.max(
+          totalEmployees - (presentToday + markedCount),
+          computedAbsent
+        )
       );
 
       setStats({
