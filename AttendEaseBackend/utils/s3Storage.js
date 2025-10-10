@@ -15,12 +15,11 @@ const AWS_S3_BUCKET
 const AWS_REGION = process.env.AWS_REGION;
 const ATTENDANCE_PREFIX = process.env.S3_ATTENDANCE_PREFIX || "attendance";
 const S3_BASE_URL =
-  process.env.S3_PUBLIC_BASE_URL ||
-  (AWS_S3_BUCKET
-    && AWS_REGION
-    ? `https://${AWS_S3_BUCKET
-    }.s3.${AWS_REGION}.amazonaws.com/`
-    : null);
+  AWS_S3_BUCKET && AWS_REGION
+    ? `https://${AWS_S3_BUCKET}.s3.${AWS_REGION}.amazonaws.com/`
+    : AWS_S3_BUCKET
+      ? `https://${AWS_S3_BUCKET}.s3.amazonaws.com/`
+      : null;
 
 function ensureLocalDirectory() {
   const uploadsRoot = path.join(__dirname, "..", "uploads");
@@ -94,8 +93,7 @@ function getLocalImagePath(imageUrl) {
 }
 
 function isS3Image(imageUrl) {
-  if (!AWS_S3_BUCKET
-    || !imageUrl) {
+  if (!AWS_S3_BUCKET || !imageUrl) {
     return false;
   }
 
@@ -104,8 +102,7 @@ function isS3Image(imageUrl) {
       return true;
     }
 
-    return imageUrl.includes(`${AWS_S3_BUCKET
-      }.s3.`);
+    return imageUrl.includes(`${AWS_S3_BUCKET}.s3.`);
   }
 
   return imageUrl.startsWith(`${ATTENDANCE_PREFIX}/`);

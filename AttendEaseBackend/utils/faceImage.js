@@ -3,11 +3,9 @@ const { URL } = require("url");
 const DEFAULT_BUCKET =
   (process.env.AWS_S3_BUCKET || process.env.S3_BUCKET_NAME || "").trim();
 const DEFAULT_REGION = (process.env.AWS_REGION || "").trim();
-const PUBLIC_BASE_URL = (process.env.S3_PUBLIC_BASE_URL || "").trim();
 
 const isHttpUrl = (value) => /^https?:\/\//i.test(value);
 
-const trimTrailingSlash = (value) => value.replace(/\/+$/, "");
 const trimLeadingSlash = (value) => value.replace(/^\/+/, "");
 
 function buildPublicFaceUrl(key) {
@@ -20,10 +18,6 @@ function buildPublicFaceUrl(key) {
   }
 
   const normalizedKey = trimLeadingSlash(key);
-
-  if (PUBLIC_BASE_URL) {
-    return `${trimTrailingSlash(PUBLIC_BASE_URL)}/${normalizedKey}`;
-  }
 
   if (!DEFAULT_BUCKET) {
     return null;
