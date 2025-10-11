@@ -4,6 +4,7 @@ const router = express.Router();
 const pool = require("../../config/db");
 const multer = require("multer");
 const fs = require("fs");
+const sharp = require("sharp");
 const {
   uploadAttendanceImage,
   isLocalImage,
@@ -18,6 +19,7 @@ const {
   CreateCollectionCommand,
   CompareFacesCommand,
   SearchFacesByImageCommand,
+  DetectFacesCommand,
 } = require("../../config/awsConfig");
 
 // Constants
@@ -73,6 +75,160 @@ const normalizeId = (value) => {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : null;
 };
+
+const GROUP_MODE_KEYWORDS = new Set([
+  "group",
+  "groups",
+  "groupattendance",
+  "groupmode",
+  "bulk",
+  "multi",
+  "multiple",
+  "multiface",
+  "multifaces",
+  "multifacemode",
+]);
+
+const isGroupModeRequest = (...rawValues) => {
+  return rawValues.some((value) => {
+    if (value === undefined || value === null) {
+      return false;
+    }
+
+    if (typeof value === "boolean") {
+      return value;
+    }
+
+    const normalized = value.toString().trim().toLowerCase();
+    if (!normalized) {
+      return false;
+    }
+
+    if (normalized === "1" || normalized === "true" || normalized === "yes") {
+      return true;
+    }
+
+    const condensed = normalized.replace(/[^a-z]/g, "");
+    return GROUP_MODE_KEYWORDS.has(condensed);
+  });
+};
+
+const computeCropRegion = (boundingBox, imageWidth, imageHeight, paddingRatio = 0.25) => {
+  if (
+    !boundingBox ||
+    typeof imageWidth !== "number" ||
+    typeof imageHeight !== "number" ||
+    imageWidth <= 0 ||
+    imageHeight <= 0
+  ) {
+    return null;
+  }
+
+  const baseWidth = Math.max(Math.round(boundingBox.Width * imageWidth), 1);
+  const baseHeight = Math.max(Math.round(boundingBox.Height * imageHeight), 1);
+  const padX = Math.round(baseWidth * paddingRatio);
+  const padY = Math.round(baseHeight * paddingRatio);
+
+  const left = Math.max(Math.round(boundingBox.Left * imageWidth) - padX, 0);
+  const top = Math.max(Math.round(boundingBox.Top * imageHeight) - padY, 0);
+
+  const width = Math.min(imageWidth - left, baseWidth + padX * 2);
+  const height = Math.min(imageHeight - top, baseHeight + padY * 2);
+
+  if (width <= 0 || height <= 0) {
+    return null;
+  }
+
+  return { left, top, width, height };
+};
+
+async function resolveEmployeeFromFaceIdentifiers({
+  faceId = null,
+  matchedExternalId = null,
+  requestedEmpId = null,
+}) {
+  const tryResolveByEmpId = async (empId) => {
+    if (empId === null) {
+      return null;
+    }
+
+    const { rows } = await pool.query(
+      "SELECT emp_id, name FROM employee WHERE emp_id = $1",
+      [empId]
+    );
+
+    return rows.length ? rows[0] : null;
+  };
+
+  let employeeRecord = null;
+
+  if (faceId) {
+    const { rows } = await pool.query(
+      "SELECT emp_id, name FROM employee WHERE face_id = $1",
+      [faceId]
+    );
+
+    if (rows.length) {
+      return rows[0];
+    }
+  }
+
+  if (!employeeRecord && matchedExternalId !== null) {
+    employeeRecord = await tryResolveByEmpId(matchedExternalId);
+  }
+
+  if (!employeeRecord && requestedEmpId !== null) {
+    employeeRecord = await tryResolveByEmpId(requestedEmpId);
+  }
+
+  if (employeeRecord && faceId) {
+    try {
+      await pool.query(
+        `UPDATE employee
+           SET face_id = $1
+         WHERE emp_id = $2
+           AND (face_id IS NULL OR face_id <> $1)`,
+        [faceId, employeeRecord.emp_id]
+      );
+    } catch (error) {
+      console.error("resolveEmployeeFromFaceIdentifiers:update face_id failed", error);
+    }
+  }
+
+  return employeeRecord;
+}
+
+function validatePunchAttempt(attendance, punchType) {
+  if (!attendance) {
+    return {
+      status: 404,
+      error: "Attendance record not found",
+    };
+  }
+
+  if (punchType === PUNCH_TYPES.IN && attendance.punch_in_time) {
+    return {
+      status: 400,
+      error: "Already punched in today",
+    };
+  }
+
+  if (punchType === PUNCH_TYPES.OUT && attendance.punch_out_time) {
+    return {
+      status: 400,
+      error: "Already punched out today",
+    };
+  }
+
+  if (punchType === PUNCH_TYPES.OUT && !attendance.punch_in_time) {
+    return {
+      status: 400,
+      error: "Must punch in first",
+    };
+  }
+
+  return null;
+}
 
 const mapRekognitionError = (error) => {
   const message = error?.message || "Face recognition failed";
@@ -588,13 +744,17 @@ router.get("/image", async (req, res) => {
 router.post("/face-attendance", upload.single("image"), async (req, res) => {
   try {
     const {
-      punch_type,
-      latitude,
-      longitude,
+      punch_type: rawPunchType,
+      latitude: rawLatitude,
+      longitude: rawLongitude,
       userId,
       address,
       emp_id: rawEmpId,
       employeeId: rawEmployeeId,
+      groupMode,
+      group_mode: groupModeAlias,
+      mode: rawMode,
+      faceMatchThreshold: rawThreshold,
     } = req.body;
 
     if (!req.file) {
@@ -614,71 +774,257 @@ router.post("/face-attendance", upload.single("image"), async (req, res) => {
 
     await ensureCollectionExists(collectionId);
 
-    // Face detection logic
+    const normalizedPunchType = (rawPunchType || "")
+      .toString()
+      .trim()
+      .toUpperCase();
+    const punchType =
+      normalizedPunchType === PUNCH_TYPES.OUT
+        ? PUNCH_TYPES.OUT
+        : PUNCH_TYPES.IN;
+
+    const thresholdCandidate = Number(rawThreshold);
+    const matchThreshold = Number.isFinite(thresholdCandidate)
+      ? thresholdCandidate
+      : DEFAULT_FACE_MATCH_THRESHOLD;
+
+    const locationPayload = {
+      latitude:
+        rawLatitude !== undefined && rawLatitude !== null && rawLatitude !== ""
+          ? rawLatitude
+          : "0",
+      longitude:
+        rawLongitude !== undefined &&
+        rawLongitude !== null &&
+        rawLongitude !== ""
+          ? rawLongitude
+          : "0",
+      address: address ?? "",
+    };
+
+    const groupModeRequested = isGroupModeRequest(
+      groupMode,
+      groupModeAlias,
+      rawMode
+    );
+
+    if (groupModeRequested) {
+      const detectCommand = new DetectFacesCommand({
+        Image: { Bytes: req.file.buffer },
+        Attributes: ["DEFAULT"],
+      });
+
+      const detectResult = await rekognition.send(detectCommand);
+      const faceDetails = detectResult?.FaceDetails ?? [];
+
+      if (!faceDetails.length) {
+        return res.status(422).json({
+          error: "No faces detected in the image",
+          suggestion: "Ensure group members are clearly visible and retry.",
+        });
+      }
+
+      const imageMetadata = await sharp(req.file.buffer).metadata();
+      const imageWidth = imageMetadata?.width ?? null;
+      const imageHeight = imageMetadata?.height ?? null;
+
+      if (!imageWidth || !imageHeight) {
+        return res.status(400).json({
+          error: "Unable to read image dimensions for face processing",
+        });
+      }
+
+      const today = formatDate();
+      const processedEmployees = new Set();
+      const results = [];
+
+      for (let index = 0; index < faceDetails.length; index += 1) {
+        const faceDetail = faceDetails[index];
+        const faceIndex = index + 1;
+        const cropRegion = computeCropRegion(
+          faceDetail.BoundingBox,
+          imageWidth,
+          imageHeight
+        );
+
+        if (!cropRegion) {
+          results.push({
+            faceIndex,
+            status: "skipped",
+            message: "Unable to crop the detected face region.",
+          });
+          continue;
+        }
+
+        let faceImageBuffer;
+        try {
+          faceImageBuffer = await sharp(req.file.buffer)
+            .extract(cropRegion)
+            .resize(600, 600, { fit: "cover" })
+            .toBuffer();
+        } catch (cropError) {
+          console.error("Group attendance: face crop failed", cropError);
+          results.push({
+            faceIndex,
+            status: "error",
+            message: "Unable to process the detected face region.",
+          });
+          continue;
+        }
+
+        try {
+          const searchResult = await rekognition.send(
+            new SearchFacesByImageCommand({
+              CollectionId: collectionId,
+              Image: { Bytes: faceImageBuffer },
+              MaxFaces: 3,
+              FaceMatchThreshold: matchThreshold,
+            })
+          );
+
+          const bestMatch = searchResult.FaceMatches?.[0];
+          if (!bestMatch?.Face) {
+            results.push({
+              faceIndex,
+              status: "unmatched",
+              similarity: null,
+              message: "No matching employee found.",
+            });
+            continue;
+          }
+
+          const similarity = bestMatch.Similarity ?? null;
+          const faceId = bestMatch.Face.FaceId;
+          const matchedExternalId = normalizeId(
+            bestMatch.Face.ExternalImageId
+          );
+          const employeeRecord = await resolveEmployeeFromFaceIdentifiers({
+            faceId,
+            matchedExternalId,
+            requestedEmpId: null,
+          });
+
+          if (!employeeRecord) {
+            results.push({
+              faceIndex,
+              status: "unmatched",
+              similarity,
+              message: "Matched face is not linked to any employee record.",
+            });
+            continue;
+          }
+
+          if (processedEmployees.has(employeeRecord.emp_id)) {
+            results.push({
+              faceIndex,
+              status: "duplicate",
+              similarity,
+              employeeId: employeeRecord.emp_id,
+              employeeName: employeeRecord.name,
+              message: "Employee already processed in this capture.",
+            });
+            continue;
+          }
+
+          const attendance = await getOrCreateAttendanceRecord(
+            employeeRecord.emp_id,
+            today
+          );
+          const validation = validatePunchAttempt(attendance, punchType);
+
+          if (validation) {
+            results.push({
+              faceIndex,
+              status: "skipped",
+              employeeId: employeeRecord.emp_id,
+              employeeName: employeeRecord.name,
+              similarity,
+              message: validation.error,
+            });
+            processedEmployees.add(employeeRecord.emp_id);
+            continue;
+          }
+
+          const updated = await processPunch(
+            attendance.attendance_id,
+            punchType,
+            { buffer: faceImageBuffer },
+            userId,
+            locationPayload,
+            {
+              employeeId: employeeRecord.emp_id,
+              requireFaceMatch: true,
+              faceMatchThreshold: matchThreshold,
+            }
+          );
+
+          results.push({
+            faceIndex,
+            status: "punched",
+            employeeId: employeeRecord.emp_id,
+            employeeName: employeeRecord.name,
+            similarity,
+            attendanceId: attendance.attendance_id,
+            punchedAt:
+              punchType === PUNCH_TYPES.IN
+                ? updated.punch_in_time
+                : updated.punch_out_time,
+          });
+
+          processedEmployees.add(employeeRecord.emp_id);
+        } catch (searchError) {
+          console.error("Group attendance: face search failed", searchError);
+          const { payload } = mapRekognitionError(searchError);
+          results.push({
+            faceIndex,
+            status: "error",
+            message:
+              payload?.details || payload?.error || "Face recognition failed",
+          });
+        }
+      }
+
+      const punchedCount = results.filter(
+        (entry) => entry.status === "punched"
+      ).length;
+
+      return res.json({
+        success: punchedCount > 0,
+        mode: "group",
+        punch_type: punchType,
+        total_faces: faceDetails.length,
+        punched_count: punchedCount,
+        results,
+      });
+    }
+
+    const requestedEmpId = normalizeId(rawEmpId ?? rawEmployeeId);
     const searchParams = {
       CollectionId: collectionId,
       Image: { Bytes: req.file.buffer },
       MaxFaces: 1,
-      FaceMatchThreshold: 90,
+      FaceMatchThreshold: matchThreshold,
     };
 
-    const command = new SearchFacesByImageCommand(searchParams);
-    const result = await rekognition.send(command);
+    const searchCommand = new SearchFacesByImageCommand(searchParams);
+    const searchResult = await rekognition.send(searchCommand);
 
-    if (!result.FaceMatches?.length) {
+    if (!searchResult.FaceMatches?.length) {
       return res.status(401).json({
         error: "No matching employee found",
         suggestion: "Use manual attendance if face recognition fails",
       });
     }
 
-    const matchedFace = result.FaceMatches[0]?.Face ?? {};
+    const matchedFace = searchResult.FaceMatches[0]?.Face ?? {};
     const faceId = matchedFace.FaceId;
     const matchedExternalId = normalizeId(matchedFace.ExternalImageId);
-    const requestedEmpId = normalizeId(rawEmpId ?? rawEmployeeId);
 
-    let employeeRecord = null;
-
-    const byFaceId = await pool.query(
-      "SELECT emp_id, name FROM employee WHERE face_id = $1",
-      [faceId]
-    );
-
-    if (byFaceId.rows.length) {
-      employeeRecord = byFaceId.rows[0];
-    } else {
-      if (matchedExternalId !== null) {
-        const byExternalId = await pool.query(
-          "SELECT emp_id, name FROM employee WHERE emp_id = $1",
-          [matchedExternalId]
-        );
-
-        if (byExternalId.rows.length) {
-          employeeRecord = byExternalId.rows[0];
-        }
-      }
-
-      if (!employeeRecord && requestedEmpId !== null) {
-        const byRequest = await pool.query(
-          "SELECT emp_id, name FROM employee WHERE emp_id = $1",
-          [requestedEmpId]
-        );
-
-        if (byRequest.rows.length) {
-          employeeRecord = byRequest.rows[0];
-        }
-      }
-
-      if (employeeRecord) {
-        await pool.query(
-          `UPDATE employee
-           SET face_id = $1
-           WHERE emp_id = $2
-             AND (face_id IS NULL OR face_id <> $1)`,
-          [faceId, employeeRecord.emp_id]
-        );
-      }
-    }
+    const employeeRecord = await resolveEmployeeFromFaceIdentifiers({
+      faceId,
+      matchedExternalId,
+      requestedEmpId,
+    });
 
     if (!employeeRecord) {
       return res.status(404).json({
@@ -687,42 +1033,39 @@ router.post("/face-attendance", upload.single("image"), async (req, res) => {
       });
     }
 
-    const emp_id = employeeRecord.emp_id;
+    const empId = employeeRecord.emp_id;
     const today = formatDate();
-    const attendance = await getOrCreateAttendanceRecord(emp_id, today);
+    const attendance = await getOrCreateAttendanceRecord(empId, today);
 
-    // Validate punch conditions
-    if (punch_type === PUNCH_TYPES.IN && attendance.punch_in_time) {
-      return res.status(400).json({ error: "Already punched in today" });
-    }
-    if (punch_type === PUNCH_TYPES.OUT && attendance.punch_out_time) {
-      return res.status(400).json({ error: "Already punched out today" });
-    }
-    if (punch_type === PUNCH_TYPES.OUT && !attendance.punch_in_time) {
-      return res.status(400).json({ error: "Must punch in first" });
+    const validation = validatePunchAttempt(attendance, punchType);
+    if (validation) {
+      return res.status(validation.status).json({
+        error: validation.error,
+      });
     }
 
     const updated = await processPunch(
       attendance.attendance_id,
-      punch_type,
+      punchType,
       req.file,
       userId,
-      { latitude, longitude, address },
+      locationPayload,
       {
-        employeeId: emp_id,
+        employeeId: empId,
         requireFaceMatch: true,
-        faceMatchThreshold: DEFAULT_FACE_MATCH_THRESHOLD,
+        faceMatchThreshold: matchThreshold,
       }
     );
 
-    res.json({
+    return res.json({
       success: true,
       employee: employeeRecord.name,
-      punch_type,
+      punch_type: punchType,
       face_similarity: updated.face_similarity ?? null,
-      face_match_threshold: updated.face_match_threshold ?? DEFAULT_FACE_MATCH_THRESHOLD,
+      face_match_threshold:
+        updated.face_match_threshold ?? matchThreshold,
       time:
-        punch_type === PUNCH_TYPES.IN
+        punchType === PUNCH_TYPES.IN
           ? updated.punch_in_time
           : updated.punch_out_time,
     });

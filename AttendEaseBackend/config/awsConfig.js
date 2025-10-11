@@ -6,6 +6,7 @@ const {
   DeleteFacesCommand,
   CompareFacesCommand,
   SearchFacesByImageCommand,
+  DetectFacesCommand,
 } = require("@aws-sdk/client-rekognition");
 const {
   S3Client,
@@ -42,6 +43,7 @@ module.exports = {
   DeleteFacesCommand,
   CompareFacesCommand,
   SearchFacesByImageCommand,
+  DetectFacesCommand,
   DeleteObjectCommand,
   PutObjectCommand,
   GetObjectCommand,

@@ -71,6 +71,7 @@ const DashboardScreen = () => {
   const [pendingCapture, setPendingCapture] = useState(null);
   const [capturedPhotoUri, setCapturedPhotoUri] = useState(null);
   const [facePreview, setFacePreview] = useState(null);
+  const [groupPunchSummary, setGroupPunchSummary] = useState(null);
   const [dateRange, setDateRange] = useState(() => {
     const today = normalizeDate(new Date());
     return { start: today, end: today };
@@ -651,6 +652,16 @@ const ensureCameraPermission = async () => {
     setCameraVisible(true);
   };
 
+  const handleGroupPunchCapture = async (punchType) => {
+    const hasPermission = await ensureCameraPermission();
+    if (!hasPermission) return;
+
+    setPendingCapture({ mode: 'groupAttendance', punchType });
+    setCapturedPhotoUri(null);
+    setCameraFacing('back');
+    setCameraVisible(true);
+  };
+
   const openFaceEnrollmentCapture = async (ward, employee) => {
     const hasPermission = await ensureCameraPermission();
     if (!hasPermission) return;
@@ -681,20 +692,145 @@ const ensureCameraPermission = async () => {
   };
 
   const submitCapturedPhoto = async () => {
-    if (!pendingCapture?.employee) {
-      Alert.alert('Face Capture', 'Missing employee details. Please try again.');
-      return;
-    }
-
     if (!capturedPhotoUri) {
       Alert.alert('Face Capture', 'Please capture a photo before submitting.');
       return;
     }
 
-    const { ward, employee, punchType, mode } = pendingCapture;
-    const employeeUserId = resolveEmployeeUserId(employee);
-    const supervisorId = user?.user_id ?? user?.id ?? user?.userId ?? null;
+    if (!pendingCapture?.mode) {
+      Alert.alert('Face Capture', 'Capture session expired. Please try again.');
+      return;
+    }
 
+    const { ward, employee, punchType, mode } = pendingCapture;
+    const supervisorId = user?.user_id ?? user?.id ?? user?.userId ?? null;
+    const timestamp = Date.now();
+
+    if (mode === 'groupAttendance') {
+      if (!punchType) {
+        Alert.alert('Attendance', 'Select punch type before capturing.');
+        return;
+      }
+
+      const normalizedPunchType = (punchType || '').toString().toUpperCase();
+      const groupKey = `group-${(punchType || '').toString().toLowerCase()}`;
+      setPunchingMap(prev => ({ ...prev, [groupKey]: true }));
+
+      let locationData = null;
+
+      try {
+        locationData = await attendanceService.getCurrentLocation();
+      } catch (error) {
+        console.error('Group attendance location error:', error);
+        Alert.alert(
+          'Location',
+          'Unable to access your location. Please enable location services and try again.'
+        );
+        setPunchingMap(prev => {
+          const updated = { ...prev };
+          delete updated[groupKey];
+          return updated;
+        });
+        return;
+      }
+
+      const formData = new FormData();
+      formData.append('punch_type', normalizedPunchType);
+      formData.append('groupMode', 'true');
+      formData.append('mode', 'group');
+      formData.append('latitude', locationData?.latitude?.toString() || '0');
+      formData.append('longitude', locationData?.longitude?.toString() || '0');
+      formData.append('address', locationData?.address || '');
+      if (supervisorId) {
+        formData.append('userId', supervisorId.toString());
+      }
+      formData.append('image', {
+        uri: capturedPhotoUri,
+        name: `group-${normalizedPunchType}-${timestamp}.jpg`,
+        type: 'image/jpeg',
+      });
+
+      try {
+        const response = await apiService.faceAttendance(formData);
+        const payload = response?.data ?? {};
+        const results = Array.isArray(payload.results) ? payload.results : [];
+        const punchedCount =
+          payload.punched_count ??
+          payload.punchedCount ??
+          results.filter(entry => entry?.status === 'punched').length;
+        const totalFaces =
+          payload.total_faces ??
+          payload.totalFaces ??
+          results.length;
+
+        const punchedNames = results
+          .filter(entry => entry?.status === 'punched' && entry?.employeeName)
+          .map(entry => entry.employeeName);
+
+        const unmatchedCount = results.filter(entry => entry?.status === 'unmatched').length;
+        const skippedCount = results.filter(entry => entry?.status === 'skipped').length;
+        const duplicateCount = results.filter(entry => entry?.status === 'duplicate').length;
+        const errorCount = results.filter(entry => entry?.status === 'error').length;
+
+        setGroupPunchSummary({
+          timestamp: Date.now(),
+          punchType: normalizedPunchType,
+          totalFaces,
+          punchedCount,
+          punchedNames,
+          unmatchedCount,
+          skippedCount,
+          duplicateCount,
+          errorCount,
+          results,
+        });
+
+        const summaryLines = [
+          `Detected faces: ${totalFaces}`,
+          `Marked: ${punchedCount}`,
+        ];
+
+        if (punchedNames.length) {
+          summaryLines.push(`Employees: ${punchedNames.join(', ')}`);
+        }
+
+        if (unmatchedCount || skippedCount || duplicateCount || errorCount) {
+          const pendingParts = [];
+          if (unmatchedCount) pendingParts.push(`Unmatched ${unmatchedCount}`);
+          if (skippedCount) pendingParts.push(`Skipped ${skippedCount}`);
+          if (duplicateCount) pendingParts.push(`Duplicates ${duplicateCount}`);
+          if (errorCount) pendingParts.push(`Errors ${errorCount}`);
+          summaryLines.push(`Pending: ${pendingParts.join(' • ')}`);
+        }
+
+        Alert.alert('Group Attendance', summaryLines.join('\n'));
+        resetCameraState();
+        await fetchDashboardStats();
+      } catch (error) {
+        console.error('Group face attendance failed:', error);
+        const message =
+          error.response?.data?.message ||
+          error.response?.data?.error ||
+          error.response?.data?.details ||
+          'Unable to process group attendance. Please try again.';
+        Alert.alert('Group Attendance', message);
+      } finally {
+        setPunchingMap(prev => {
+          const updated = { ...prev };
+          delete updated[groupKey];
+          return updated;
+        });
+      }
+
+      return;
+    }
+
+    if (!employee) {
+      Alert.alert('Face Capture', 'Missing employee details. Please try again.');
+      return;
+    }
+
+    const employeeUserId = resolveEmployeeUserId(employee);
     if (!employeeUserId) {
       Alert.alert('Face Capture', 'Unable to determine the employee user ID.');
       return;
@@ -703,7 +839,7 @@ const ensureCameraPermission = async () => {
     const wardId = ward?.ward_id;
     const employeeId = employee?.emp_id ?? employee?.empId ?? employee?.id;
     const enrollmentKey = `${wardId ?? 'global'}-${employeeId ?? employeeUserId}`;
-    const timestamp = Date.now();
+
     const buildImageFile = (suffix) => ({
       uri: capturedPhotoUri,
       name: `${employeeId || employeeUserId || 'employee'}-${suffix}-${timestamp}.jpg`,
@@ -713,9 +849,9 @@ const ensureCameraPermission = async () => {
     let locationData = null;
     let attendanceId = null;
     const attendanceDate = new Date().toISOString().split('T')[0];
+    const normalizedPunchType = (punchType ?? '').toString().toUpperCase();
 
     const buildAttendanceFormData = (suffix, forFaceAttendance = true) => {
-      const normalizedPunchType = (punchType ?? '').toString().toUpperCase();
       const formData = new FormData();
       formData.append('punch_type', normalizedPunchType);
       formData.append('latitude', locationData?.latitude?.toString() || '0');
@@ -724,7 +860,9 @@ const ensureCameraPermission = async () => {
       formData.append('image_type', 'face');
       formData.append('date', attendanceDate);
 
-      const resolvedUserId = forFaceAttendance ? employeeUserId : (supervisorId ?? employeeUserId);
+      const resolvedUserId = forFaceAttendance
+        ? employeeUserId
+        : (supervisorId ?? employeeUserId);
       if (resolvedUserId) {
         formData.append('userId', resolvedUserId.toString());
       }
@@ -765,7 +903,10 @@ const ensureCameraPermission = async () => {
       try {
         const fallbackFormData = buildAttendanceFormData('attendance-fallback', false);
         await apiService.punchInOut(fallbackFormData);
-        Alert.alert('Attendance', `${employee.emp_name || 'Employee'} attendance recorded without face verification.`);
+        Alert.alert(
+          'Attendance',
+          `${employee.emp_name || 'Employee'} attendance recorded without face verification.`
+        );
         resetCameraState();
         await fetchDashboardStats();
       } catch (fallbackError) {
@@ -1071,24 +1212,33 @@ Please delete the existing face from the Face Enrollment Center before capturing
 
   const captureMode = pendingCapture?.mode;
   const isFaceEnrollmentMode = captureMode === 'storeFace';
+  const isGroupPunchMode = captureMode === 'groupAttendance';
   const activePunchType = pendingCapture?.punchType;
   const cameraTitleText = isFaceEnrollmentMode
     ? 'Store Face Photo'
     : activePunchType
-      ? `Capture ${activePunchType === 'out' ? 'Punch Out' : 'Punch In'} Photo`
+      ? `Capture ${isGroupPunchMode ? 'Group ' : ''}${activePunchType === 'out' ? 'Punch Out' : 'Punch In'} Photo`
       : 'Capture Attendance Photo';
-  const submitButtonLabel = isFaceEnrollmentMode ? 'Save Face' : 'Submit Attendance';
+  const submitButtonLabel = isFaceEnrollmentMode
+    ? 'Save Face'
+    : isGroupPunchMode
+      ? 'Submit Group Attendance'
+      : 'Submit Attendance';
   const cameraHintText = isFaceEnrollmentMode
     ? 'Ensure the employee face is clear before saving.'
-    : 'Review the photo. Retake if it is unclear.';
+    : isGroupPunchMode
+      ? 'Align every face in the group within the frame before submitting.'
+      : 'Review the photo. Retake if it is unclear.';
   const cameraActionSuffix = isFaceEnrollmentMode
     ? ' • Action: Store Face'
     : activePunchType
-      ? ` • Action: Punch ${activePunchType === 'out' ? 'Out' : 'In'}`
+      ? ` • Action: ${isGroupPunchMode ? 'Group ' : ''}Punch ${activePunchType === 'out' ? 'Out' : 'In'}`
       : '';
-  const cameraFooterSummary = pendingCapture?.employee
-    ? `Employee: ${pendingCapture.employee.emp_name || ''} • Ward: ${pendingCapture.ward?.ward_name || ''}${cameraActionSuffix}`
-    : null;
+  const cameraFooterSummary = isGroupPunchMode
+    ? `Mode: Group Attendance${cameraActionSuffix}`
+    : pendingCapture?.employee
+      ? `Employee: ${pendingCapture.employee.emp_name || ''} • Ward: ${pendingCapture.ward?.ward_name || ''}${cameraActionSuffix}`
+      : null;
 
   const getAttendanceStatusTheme = (status) => {
     switch (status) {
@@ -1193,6 +1343,9 @@ Please delete the existing face from the Face Enrollment Center before capturing
   const totalFaceCandidates = faceEnrollmentEntries.length;
   const totalFaceEnrolled = faceEnrollmentEntries.filter(item => item.hasFaceEnrollment).length;
   const isTwoColumnLayout = isTablet || isDesktop;
+  const isGroupPunchingIn = !!punchingMap['group-in'];
+  const isGroupPunchingOut = !!punchingMap['group-out'];
+  const isGroupPunchBusy = isGroupPunchingIn || isGroupPunchingOut;
 
   const closeFacePreview = useCallback(() => {
     setFacePreview(null);
@@ -1345,6 +1498,73 @@ Please delete the existing face from the Face Enrollment Center before capturing
           <Text style={styles.headerMetaText}>Last sync moments ago</Text>
         </View>
       </View>
+
+      <View style={styles.groupPunchContainer}>
+        <TouchableOpacity
+          style={[
+            styles.groupPunchButton,
+            styles.groupPunchInButton,
+            isGroupPunchBusy && styles.groupPunchButtonDisabled,
+          ]}
+          onPress={() => handleGroupPunchCapture('in')}
+          disabled={isGroupPunchBusy}
+        >
+          <Ionicons name="log-in-outline" size={18} color="#fff" />
+          <Text style={styles.groupPunchButtonText}>
+            {isGroupPunchingIn ? 'Processing...' : 'Punch In'}
+          </Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={[
+            styles.groupPunchButton,
+            styles.groupPunchOutButton,
+            isGroupPunchBusy && styles.groupPunchButtonDisabled,
+          ]}
+          onPress={() => handleGroupPunchCapture('out')}
+          disabled={isGroupPunchBusy}
+        >
+          <Ionicons name="log-out-outline" size={18} color="#fff" />
+          <Text style={styles.groupPunchButtonText}>
+            {isGroupPunchingOut ? 'Processing...' : 'Punch Out'}
+          </Text>
+        </TouchableOpacity>
+      </View>
+
+      {groupPunchSummary && (
+        <View style={styles.groupPunchSummaryCard}>
+          <View style={styles.groupPunchSummaryHeader}>
+            <Ionicons
+              name={groupPunchSummary.punchType === 'OUT' ? 'arrow-redo-circle' : 'arrow-undo-circle'}
+              size={20}
+              color={groupPunchSummary.punchType === 'OUT' ? '#ff5a5f' : '#2dce89'}
+            />
+            <Text style={styles.groupPunchSummaryTitle}>
+              Last Group Punch {groupPunchSummary.punchType === 'OUT' ? 'Out' : 'In'}
+            </Text>
+          </View>
+          <Text style={styles.groupPunchSummaryMeta}>
+            {new Date(groupPunchSummary.timestamp).toLocaleTimeString()} • Faces {groupPunchSummary.totalFaces} • Marked {groupPunchSummary.punchedCount}
+          </Text>
+          {groupPunchSummary.punchedNames?.length ? (
+            <Text style={styles.groupPunchSummaryNames}>
+              Marked: {groupPunchSummary.punchedNames.join(', ')}
+            </Text>
+          ) : null}
+          {(groupPunchSummary.unmatchedCount ||
+            groupPunchSummary.skippedCount ||
+            groupPunchSummary.duplicateCount ||
+            groupPunchSummary.errorCount) ? (
+            <Text style={styles.groupPunchSummaryNotes}>
+              Pending: {[
+                groupPunchSummary.unmatchedCount ? `Unmatched ${groupPunchSummary.unmatchedCount}` : null,
+                groupPunchSummary.skippedCount ? `Skipped ${groupPunchSummary.skippedCount}` : null,
+                groupPunchSummary.duplicateCount ? `Duplicates ${groupPunchSummary.duplicateCount}` : null,
+                groupPunchSummary.errorCount ? `Errors ${groupPunchSummary.errorCount}` : null,
+              ].filter(Boolean).join(' • ')}
+            </Text>
+          ) : null}
+        </View>
+      )}
 
       <View style={styles.content}>
         <View
@@ -1803,10 +2023,15 @@ Please delete the existing face from the Face Enrollment Center before capturing
                     <Text style={styles.cameraButtonTextPrimary}>Retake</Text>
                   </TouchableOpacity>
                   <TouchableOpacity
-                    style={[styles.cameraButton, styles.cameraSubmitButton]}
+                    style={[styles.cameraButton, styles.cameraSubmitButton, (isGroupPunchMode && isGroupPunchBusy) && styles.cameraButtonDisabled]}
                     onPress={submitCapturedPhoto}
+                    disabled={isGroupPunchMode && isGroupPunchBusy}
                   >
-                    <Text style={styles.cameraSubmitText}>{submitButtonLabel}</Text>
+                    {isGroupPunchMode && isGroupPunchBusy ? (
+                      <ActivityIndicator size="small" color="#ffffff" />
+                    ) : (
+                      <Text style={styles.cameraSubmitText}>{submitButtonLabel}</Text>
+                    )}
                   </TouchableOpacity>
                 </>
               ) : (
@@ -1984,6 +2209,77 @@ const styles = StyleSheet.create({
   },
   dashboardMain: {
     flex: 1,
+  },
+  groupPunchContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginHorizontal: 20,
+    marginTop: 16,
+    marginBottom: 12,
+    gap: 12,
+  },
+  groupPunchButton: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 14,
+    borderRadius: 16,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.12,
+    shadowRadius: 10,
+    elevation: 4,
+  },
+  groupPunchInButton: {
+    backgroundColor: '#2dce89',
+  },
+  groupPunchOutButton: {
+    backgroundColor: '#ff5a5f',
+  },
+  groupPunchButtonDisabled: {
+    opacity: 0.65,
+  },
+  groupPunchButtonText: {
+    color: '#ffffff',
+    fontSize: 16,
+    fontWeight: '700',
+    marginLeft: 8,
+  },
+  groupPunchSummaryCard: {
+    marginHorizontal: 20,
+    marginBottom: 16,
+    padding: 16,
+    borderRadius: 16,
+    backgroundColor: '#f7f9ff',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: '#d7defe',
+  },
+  groupPunchSummaryHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 6,
+  },
+  groupPunchSummaryTitle: {
+    marginLeft: 8,
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#1f2b6c',
+  },
+  groupPunchSummaryMeta: {
+    fontSize: 13,
+    color: '#4c5c96',
+    marginBottom: 4,
+  },
+  groupPunchSummaryNames: {
+    fontSize: 13,
+    color: '#1f2b6c',
+    marginBottom: 2,
+  },
+  groupPunchSummaryNotes: {
+    fontSize: 12,
+    color: '#6b778d',
   },
   dateFilterCard: {
     backgroundColor: '#ffffff',
@@ -2716,6 +3012,9 @@ const styles = StyleSheet.create({
   cameraSubmitButton: {
     backgroundColor: '#28a745',
     marginLeft: 8,
+  },
+  cameraButtonDisabled: {
+    opacity: 0.7,
   },
   cameraButtonTextPrimary: {
     color: '#007bff',
