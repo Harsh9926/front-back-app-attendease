@@ -96,6 +96,7 @@ export const API_ENDPOINTS = {
   PUNCH_IN_OUT: '/app/attendance/employee',
   ATTENDANCE_RECORD: '/attendance',
   EMPLOYEE_DETAIL: '/app/attendance/employee/detail',
+  EMPLOYEE_DETAIL_DAILY: '/app/attendance/employee/detail/daily',
   FETCH_IMAGE: '/app/attendance/employee/image',
   FACE_ATTENDANCE: '/app/attendance/employee/face-attendance',
   STORE_FACE: '/app/attendance/employee/faceRoutes/store-face',

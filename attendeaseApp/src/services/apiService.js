@@ -277,6 +277,58 @@ export const apiService = {
     headers: { 'Content-Type': 'multipart/form-data' }
   }),
 
+  getEmployeeDailyAttendance: async (employeeId, options = {}) => {
+    if (!employeeId) {
+      throw new Error('getEmployeeDailyAttendance: employeeId is required');
+    }
+
+    const params = {
+      empId: employeeId,
+    };
+
+    if (options.startDate) {
+      params.startDate = options.startDate;
+    }
+    if (options.endDate) {
+      params.endDate = options.endDate;
+    }
+
+    try {
+      const response = await api.get(API_ENDPOINTS.EMPLOYEE_DETAIL_DAILY, {
+        params,
+      });
+      const payload = response?.data ?? null;
+
+      if (payload?.success === false) {
+        return {
+          success: false,
+          data: payload?.data ?? null,
+          message:
+            payload?.error ??
+            payload?.message ??
+            'Unable to fetch attendance details.',
+          raw: payload,
+        };
+      }
+
+      const data =
+        payload?.data ??
+        (payload?.records
+          ? { records: payload.records, stats: payload.stats, range: payload.range }
+          : payload);
+
+      return {
+        success: true,
+        data,
+        message: payload?.message ?? null,
+        raw: payload,
+      };
+    } catch (error) {
+      console.error('getEmployeeDailyAttendance error:', error);
+      throw error;
+    }
+  },
+
   getAttendanceRecord: (data) => api.post(API_ENDPOINTS.ATTENDANCE_RECORD, data),
 
   getEmployeeDetail: (empId, month) => api.get(API_ENDPOINTS.EMPLOYEE_DETAIL, {
